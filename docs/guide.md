@@ -116,6 +116,26 @@ Write only `{ "target": "alias", "mode": "review", "instruction": "..." }` to th
 
 Native execution failures return `status: failed`, `error_code: NATIVE_FAILED` and allowlisted `native_error_code` values (`SANDBOX_UNAVAILABLE`, `NATIVE_UNAVAILABLE`, `TIMEOUT`, `OUTPUT_LIMIT`, `NATIVE_FAILURE`, `INVALID_NATIVE_STREAM`) plus fixed `native_detail` values (`AUTH_FAILED`, `RATE_LIMITED`, `PROVIDER_ERROR`, `PERMISSION_DENIED`, `UNSUCCESSFUL_RESULT`, `INVALID_RESULT`, `EMPTY_RESULT`, `SUMMARY_TOO_LARGE`, `NO_RESULT`, `INVALID_STREAM`, `EXIT_NONZERO`); raw CLI logs are not returned. Other failed jobs use `CANDIDATE_INVALID`, `SOURCE_CONFLICT`, `ARTIFACT_FAILURE` or `JOB_FAILED`; rejected inputs use `INVALID_REQUEST` or `INVALID_CONFIG` (exit 2; failed jobs exit 1). Do not interpret a safety rejection as a successful result or automatically retry it.
 
+## 7. Development without publishing secrets
+
+Keep the source checkout separate from private runtime configuration, keys and writable workspaces. `.gitignore` reduces accidental staging, but does not untrack existing files or prevent `git add -f`. Private repositories still need secret protection.
+
+Install [Gitleaks](https://github.com/gitleaks/gitleaks/releases) (verified with 8.30.1), verify its release checksum, and put `gitleaks` on `PATH`. In each development checkout:
+
+```sh
+git config --get core.hooksPath
+# If an existing hook path or .git/hooks/pre-commit is in use, integrate
+# the guard with it instead of replacing that hook.
+git config --local core.hooksPath .githooks
+gitleaks git --log-opts=--all --redact=100 --no-banner
+```
+
+The executable `.githooks/pre-commit` scans staged changes only. A detected secret, missing scanner, scan timeout or scanner error rejects the commit. Logs redact detected secret values. An unstaged edit is not part of the commit and is not scanned by this hook.
+
+Before pushing, review `git diff --cached` locally, verify that runtime/key files are absent, and run the history scan above on the source repository—not the runtime directory. Do not paste sensitive diffs or scan reports into public issues. Enable GitHub secret scanning and push protection on your repository where available. Neither detector catches every secret; hooks can be bypassed and provider push protection has pattern and bypass limitations. If a real secret is committed or pushed, revoke/rotate it first; deleting the latest file does not remove Git history.
+
+For unpublished feature work, create a separate **private repository**, clone the public source and push to that private remote. A public GitHub fork remains public and cannot independently become private; see [GitHub fork visibility](https://docs.github.com/en/pull-requests/reference/forks). Keep public upstream as a fetch source; publish only reviewed code changes, never private runtime files or operational history. A separate private development repository is optional, not a runtime requirement.
+
 ## Further reading
 
 - [Front page](../README.md) · [한국어 front page](../README.ko.md)

@@ -79,6 +79,7 @@ workspace는 `tasks: []`로 시작합니다. 계정 격리, private 설치와 Ch
 - `curl | sh`는 저장소의 설치 스크립트를 현재 사용자 권한으로 실행합니다.
   스크립트를 신뢰·검토하세요. wheel checksum이 shell 스크립트까지 무조건
   신뢰해도 된다는 뜻은 아닙니다.
+- source 개발 시 [커밋 전 secret 검사](docs/guide.ko.md#7-secret을-공개하지-않는-개발)를 켜고 runtime/key 파일을 checkout 밖에 두세요.
 
 [상세 안내](docs/guide.ko.md) · [설계](DESIGN.md) ·
 [config 예시](config.example.json) · [라이선스](LICENSE)

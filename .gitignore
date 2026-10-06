@@ -5,6 +5,10 @@ __pycache__/
 build/
 dist/
 .dotunnel-setup/
+config.local.json
+connection-workspace/
+.connection-state/
+.tunnel-client/
 .env
 .env.*
 *.pem

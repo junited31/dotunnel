@@ -116,6 +116,26 @@ setup이 초기 workspace와 config를 만듭니다. 직접 구성할 때는 [`c
 
 native 실행 실패는 `status: failed`, `error_code: NATIVE_FAILED`와 허용된 `native_error_code`(`SANDBOX_UNAVAILABLE`, `NATIVE_UNAVAILABLE`, `TIMEOUT`, `OUTPUT_LIMIT`, `NATIVE_FAILURE`, `INVALID_NATIVE_STREAM`), 고정 `native_detail`(`AUTH_FAILED`, `RATE_LIMITED`, `PROVIDER_ERROR`, `PERMISSION_DENIED`, `UNSUCCESSFUL_RESULT`, `INVALID_RESULT`, `EMPTY_RESULT`, `SUMMARY_TOO_LARGE`, `NO_RESULT`, `INVALID_STREAM`, `EXIT_NONZERO`)만 반환하며 raw CLI log는 반환하지 않습니다. 그 밖의 실패는 `CANDIDATE_INVALID`, `SOURCE_CONFLICT`, `ARTIFACT_FAILURE`, `JOB_FAILED`, 입력 거부는 `INVALID_REQUEST`, `INVALID_CONFIG`로 구분합니다(거부 exit 2, 작업 실패 exit 1). 안전 거부를 성공으로 처리하거나 자동 재시도하지 마세요.
 
+## 7. Secret을 공개하지 않는 개발
+
+source checkout을 private runtime 설정·key·쓰기 가능한 workspace와 분리하세요. `.gitignore`는 실수로 stage하는 것을 줄일 뿐 이미 tracked인 파일이나 `git add -f`를 막지 않습니다. private 저장소에도 유출 방지가 필요합니다.
+
+[Gitleaks](https://github.com/gitleaks/gitleaks/releases)를 설치하고(8.30.1로 검증), release checksum을 확인한 뒤 `gitleaks`를 `PATH`에 두세요. 각 개발 checkout에서:
+
+```sh
+git config --get core.hooksPath
+# 기존 hook 경로나 .git/hooks/pre-commit이 사용 중이면 덮어쓰지 말고
+# 기존 hook에 이 검사를 통합하세요.
+git config --local core.hooksPath .githooks
+gitleaks git --log-opts=--all --redact=100 --no-banner
+```
+
+실행 가능한 `.githooks/pre-commit`은 staged 변경만 검사합니다. secret 탐지, 검사기 부재, 검사 timeout, 검사기 오류 시 커밋을 거부하고 탐지 값은 log에서 가립니다. unstaged 변경은 커밋에 포함되지 않으며 이 hook의 검사 대상도 아닙니다.
+
+push 전 `git diff --cached`를 로컬에서 검토하고 runtime/key 파일이 없는지 확인하세요. 위 history 검사는 runtime 디렉터리가 아니라 source 저장소에서 실행합니다. 민감한 diff·검사 보고서를 공개 issue에 붙이지 마세요. 지원되는 저장소에서는 GitHub secret scanning·push protection도 켜세요. 모든 secret을 탐지할 수는 없고 hook은 우회 가능하며 provider push protection에도 패턴·우회 한계가 있습니다. 실제 secret이 commit/push되면 먼저 폐기·교체하세요. 최신 파일을 삭제해도 Git 이력에는 남습니다.
+
+미공개 기능은 별도 **private 저장소**를 만들고 public source를 clone한 뒤 private remote에 push해 개발하세요. public GitHub fork는 public이며 독립적으로 private으로 바꿀 수 없습니다([GitHub fork visibility](https://docs.github.com/en/pull-requests/reference/forks)). public upstream은 fetch용으로 두고 검토한 코드 변경만 공개하세요. private runtime 파일·운영 기록은 보내지 않습니다. 별도 private 개발 저장소는 선택 사항이며 실행 필수 요소가 아닙니다.
+
 ## 추가 참고
 
 - [English front page](../README.md) · [한국어 front page](../README.ko.md)

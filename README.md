@@ -80,6 +80,7 @@ isolation, private installation and connecting the Tunnel to ChatGPT.
 - `curl | sh` executes the repository's installer code as your user.
   Trust/review that script; the wheel checksum does not make the shell script
   itself a trust-free download.
+- For source development, enable the [pre-commit secret guard](docs/guide.md#7-development-without-publishing-secrets); keep runtime/key files outside the checkout.
 
 [Detailed guide](docs/guide.md) · [Design](DESIGN.md) ·
 [Example config](config.example.json) · [License](LICENSE)
