@@ -26,7 +26,7 @@ class Fixture:
         self.backend_state = self.private / 'backend-state.json'
         self.backend_state.write_text(json.dumps({'effects': 0, 'calls': 0}))
         self.backend_state.chmod(0o600)
-        executable = Path(os.path.realpath(sys.executable))
+        executable = Path('/usr/bin/python3').resolve(strict=True)
         self.backend_file = self.private / 'backend.py'
         self.backend_file.write_bytes((Path(__file__).parent / 'backend_fixture.py').read_bytes())
         self.backend_file.chmod(0o400)

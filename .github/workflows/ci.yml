@@ -107,7 +107,7 @@ jobs:
           backend_state = private / "backend-state.json"
           backend_state.write_text(json.dumps({"effects": 0, "mode": "zero_exit_only"}))
           backend_state.chmod(0o600)
-          executable = Path(os.path.realpath(sys.executable))
+          executable = Path("/usr/bin/python3").resolve(strict=True)
           config = private / "config.json"
           config.write_text(json.dumps({
               "protocol": "dotunnel.adapter.config/1",

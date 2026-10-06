@@ -22,7 +22,7 @@ class RunnerConsumerTests(unittest.TestCase):
             private.mkdir(mode=0o700)
             workspace.mkdir(mode=0o700)
             state.mkdir(mode=0o700)
-            executable = Path(os.path.realpath(sys.executable))
+            executable = Path('/usr/bin/python3').resolve(strict=True)
             digest = 'sha256:' + hashlib.sha256(executable.read_bytes()).hexdigest()
             backend = private / 'backend.py'
             backend.write_text('''import json, sys

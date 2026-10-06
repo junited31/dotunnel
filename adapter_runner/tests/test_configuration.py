@@ -27,7 +27,7 @@ class ConfigurationTests(unittest.TestCase):
         self.backend_script = self.private / "backend.py"
         self.backend_script.write_bytes(b"")
         self.backend_script.chmod(0o600)
-        self.executable = Path(os.path.realpath(sys.executable))
+        self.executable = Path("/usr/bin/python3").resolve(strict=True)
         self.digest = "sha256:" + hashlib.sha256(self.executable.read_bytes()).hexdigest()
         self.config_path = self.private / "config.json"
         self.write_config()
