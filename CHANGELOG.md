@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — installer and documentation
+
+- Add a one-line Linux installer for the pinned 0.1.3 release. It verifies the wheel's size and SHA-256 before isolated, binary-only installation into a user-owned virtualenv, and refuses existing installations or unrelated launchers.
+- Keep a completed virtualenv and its launcher together even if printing the final installation message fails.
+- Shorten both READMEs to quickstarts and move detailed installation, account, Tunnel, task and CLI guidance into bilingual guides. Anonymous installation becomes available only after the repository is made public.
+- The package version and existing 0.1.3 release wheel are unchanged; no credentials, connections or services are changed by installation.
+
 ## 0.1.3
 
 - Harden Bubblewrap installation against inherited PATH substitution of sudo or package-manager commands. Administrative execution uses trusted absolute system executables.

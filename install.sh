@@ -220,7 +220,7 @@ except OSError as error:
     raise SystemExit(1)
 PY
 LAUNCHER_CREATED=1
-ENV_CREATED=0
+ENV_CREATED=0 LAUNCHER_CREATED=0
 
 printf 'Installed dotunnel 0.1.3 in %s\n' "$VENV_PATH"
 printf 'The official tunnel-client remains separate and was not installed or changed.\n'
