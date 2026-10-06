@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dotunnel"
+version = "0.1.0"
+description = "Scoped local file and fixed-task MCP server for private Secure MCP Tunnels"
+requires-python = ">=3.11"
+dependencies = ["mcp==2.2.0"]
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+classifiers = [
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+]
+
+[project.urls]
+Homepage = "https://github.com/junited31/dotunnel"
+Releases = "https://github.com/junited31/dotunnel/releases"
+
+[project.scripts]
+dotunnel = "dotunnel.operator:main"
+
+[tool.setuptools.packages.find]
+include = ["dotunnel*"]
