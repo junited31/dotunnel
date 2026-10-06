@@ -248,9 +248,11 @@ def _diagnose(argv: list[str]) -> int:
         sandbox_status = _bubblewrap_status()
     except Exception:
         sandbox_status = "unusable"
-    from .integrations import print_bubblewrap_status
+    from .integrations import bubblewrap_install_argv, print_bubblewrap_guidance, print_bubblewrap_status
 
     print_bubblewrap_status(sandbox_status)
+    if sandbox_status == "missing":
+        print_bubblewrap_guidance(bubblewrap_install_argv())
     if configured_names and sandbox_status != "ready":
         print("Configured CLI integrations require a working Bubblewrap.")
         checks_ok = False

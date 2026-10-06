@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dotunnel"
-version = "0.1.1"
+version = "0.1.2"
 description = "Scoped local file and fixed-task MCP server for private Secure MCP Tunnels"
 requires-python = ">=3.11"
 dependencies = ["mcp==2.2.0"]

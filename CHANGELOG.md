@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.2
+
+- When Bubblewrap is missing and the setup account can use sudo (passwordless `sudo -n true`, or membership in `sudo`/`wheel`/`admin`), setup offers to install it with the distribution's command and `[Y/n]` (Enter approves). The command runs on the same terminal so sudo can ask for a password, then setup re-probes and continues. Without sudo, or after a declined or failed install, setup shows the command for an administrator. An installed but unusable bwrap is never reinstalled.
+- Install commands are now non-interactive (`apt-get install -y`, `dnf install -y`, `pacman --noconfirm`, `zypper --non-interactive`, `apk add`), since setup already asked for approval.
+- Documentation recommends installing from an administrator account and keeping the runtime account without sudo, because tasks and CLI jobs inherit its permissions.
+
 ## 0.1.1
 
 - setup always checks Bubblewrap right after the configuration doctor, before any CLI prompts. The check runs a short isolated probe with the same namespace flags as CLI jobs, so an installed but blocked bwrap is reported as unusable rather than ready.

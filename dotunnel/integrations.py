@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shutil
 import stat
+import shlex
 import subprocess
 from typing import Any
 
@@ -276,17 +277,18 @@ def bubblewrap_status(path: Path = BWRAP_PATH) -> str:
     return "ready" if result.returncode == 0 else "unusable"
 
 
-_INSTALL_COMMANDS = (
-    ({"debian", "ubuntu"}, "sudo apt install bubblewrap"),
-    ({"fedora", "rhel", "centos"}, "sudo dnf install bubblewrap"),
-    ({"arch"}, "sudo pacman -S bubblewrap"),
-    ({"opensuse", "suse", "sles"}, "sudo zypper install bubblewrap"),
-    ({"alpine"}, "sudo apk add bubblewrap"),
+_INSTALL_ARGV = (
+    ({"debian", "ubuntu"}, ("sudo", "apt-get", "install", "-y", "bubblewrap")),
+    ({"fedora", "rhel", "centos"}, ("sudo", "dnf", "install", "-y", "bubblewrap")),
+    ({"arch"}, ("sudo", "pacman", "-S", "--noconfirm", "bubblewrap")),
+    ({"opensuse", "suse", "sles"}, ("sudo", "zypper", "--non-interactive", "install", "bubblewrap")),
+    ({"alpine"}, ("sudo", "apk", "add", "bubblewrap")),
 )
+_ADMIN_GROUPS = frozenset({"sudo", "wheel", "admin"})
 
 
-def bubblewrap_install_command(os_release: Path = Path("/etc/os-release")) -> str | None:
-    """Suggest the distribution's install command; never runs it."""
+def bubblewrap_install_argv(os_release: Path = Path("/etc/os-release")) -> list[str] | None:
+    """The distribution's non-interactive install command; None for unknown distributions."""
     try:
         text = os_release.read_text(encoding="utf-8", errors="replace")[:65536]
     except OSError:
@@ -297,10 +299,54 @@ def bubblewrap_install_command(os_release: Path = Path("/etc/os-release")) -> st
         if key.strip() in ("ID", "ID_LIKE"):
             families += value.strip().strip("'\"").lower().split()
     for family in families:
-        for names, command in _INSTALL_COMMANDS:
+        for names, argv in _INSTALL_ARGV:
             if family in names or any(family.startswith(name + "-") for name in names):
-                return command
+                return list(argv)
     return None
+
+
+def _group_names() -> set[str]:
+    import grp
+
+    names: set[str] = set()
+    for gid in os.getgroups():
+        try:
+            names.add(grp.getgrgid(gid).gr_name)
+        except KeyError:
+            continue
+    return names
+
+
+def sudo_available(*, sudo: str | None | object = ..., group_names: set[str] | None = None) -> bool:
+    """Best-effort check that this account may use sudo, without asking for a password.
+
+    Passwordless sudo is detected with `sudo -n true`; password sudo is inferred from
+    membership in a conventional administrator group. A wrong guess only means the
+    install attempt fails and setup falls back to printed guidance.
+    """
+    path = shutil.which("sudo") if sudo is ... else sudo
+    if not path:
+        return False
+    try:
+        result = subprocess.run(
+            [str(path), "-n", "true"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
+        )
+        if result.returncode == 0:
+            return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+    groups = _group_names() if group_names is None else group_names
+    return bool(groups & _ADMIN_GROUPS)
+
+
+def install_bubblewrap(argv: list[str]) -> bool:
+    """Run the approved install command on this terminal so sudo can ask for a password."""
+    print(f"Running: {shlex.join(argv)}", flush=True)
+    try:
+        return subprocess.run(argv, timeout=900).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def print_bubblewrap_status(status: str) -> None:
@@ -311,14 +357,16 @@ def print_bubblewrap_status(status: str) -> None:
     if status == "missing":
         print("Bubblewrap: not installed. It is required only for optional Codex/Claude Code/OMP integrations;")
         print("the Tunnel connection, file tools and fixed tasks work without it.")
-        command = bubblewrap_install_command()
-        if command:
-            print(f"Install it from an account with sudo rights: {command}")
-        else:
-            print("Install the 'bubblewrap' package (providing /usr/bin/bwrap) with your distribution's package manager, using sudo.")
     else:
         print("Bubblewrap: installed but cannot create isolated namespaces here (kernel, AppArmor or container policy).")
         print("Optional CLI integrations stay unavailable until an administrator allows unprivileged user namespaces for bwrap.")
+
+
+def print_bubblewrap_guidance(argv: list[str] | None) -> None:
+    if argv:
+        print(f"Install it from an account with sudo rights: {shlex.join(argv)}")
+    else:
+        print("Install the 'bubblewrap' package (providing /usr/bin/bwrap) with your distribution's package manager, using sudo.")
 
 
 def _validate_job_data(

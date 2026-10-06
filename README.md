@@ -24,7 +24,7 @@ Each user **installs it on their own server**. It is not a hosted service, a pub
 - PyPI access to install dependencies. For `uv`, see the [official installation guide](https://docs.astral.sh/uv/getting-started/installation/).
 - GitHub CLI (`gh`), logged in, for `dotunnel update`.
 - ChatGPT connection prerequisites, obtained separately: developer-mode eligibility, Platform Tunnel permissions, workspace association, a Tunnel ID, a runtime key and the official tunnel-client.
-- Optional CLI integrations only: Bubblewrap (`/usr/bin/bwrap`, installed by an administrator with sudo) and an installed, logged-in Codex/Claude Code/OMP. setup checks it and shows the install command.
+- Optional CLI integrations only: Bubblewrap (`/usr/bin/bwrap`) and an installed, logged-in Codex/Claude Code/OMP. setup checks Bubblewrap and, if this account can use sudo, offers to install it (`[Y/n]`); otherwise it shows the command for an administrator.
 
 ## 1. Choose the runtime account
 
@@ -142,12 +142,13 @@ Never enter the Platform runtime key in the ChatGPT app. The connection type is 
 After the configuration doctor, setup always checks Bubblewrap: whether `/usr/bin/bwrap` exists **and** can actually create the isolated namespaces CLI jobs use. The core (Tunnel, file tools, fixed tasks) never needs it.
 
 - **ready:** CLI selection opens (if any CLI is installed).
-- **not installed:** setup shows the install command for your distribution, for example `sudo apt install bubblewrap` (Debian/Ubuntu), `sudo dnf install bubblewrap` (Fedora/RHEL), `sudo pacman -S bubblewrap` (Arch), `sudo zypper install bubblewrap` (openSUSE) or `sudo apk add bubblewrap` (Alpine). dotunnel never runs sudo itself.
-- **installed but unusable:** the kernel, AppArmor or container policy blocks unprivileged user namespaces; an administrator must allow them for bwrap.
+- **not installed, account can use sudo:** setup asks whether to install it now with the distribution's command, e.g. `sudo apt-get install -y bubblewrap`, answered with `[Y/n]`. Enter/y runs it in the same terminal, where sudo may ask for your password, then checks again. n skips installation. Detection uses passwordless `sudo -n true` or membership in the `sudo`/`wheel`/`admin` group; if the install fails, setup falls back to the guidance below.
+- **not installed, no sudo:** setup shows the command for an administrator to run: `sudo apt-get install -y bubblewrap` (Debian/Ubuntu), `sudo dnf install -y bubblewrap` (Fedora/RHEL), `sudo pacman -S --noconfirm bubblewrap` (Arch), `sudo zypper --non-interactive install bubblewrap` (openSUSE) or `sudo apk add bubblewrap` (Alpine). Unknown distributions get the package name only.
+- **installed but unusable:** the kernel, AppArmor or container policy blocks unprivileged user namespaces; an administrator must allow them for bwrap. Reinstalling does not help, so it is not offered.
 
-If CLIs are installed but Bubblewrap is not ready, setup waits: run the command in another terminal from an account with sudo rights, then press Enter to check again and continue to the selection in the same run, or type `s` to skip. Skipping keeps the base setup; later run `dotunnel setup --directory DIR` to enable integrations. `dotunnel doctor` reports the same status.
+If CLIs are installed but Bubblewrap is still not ready, setup waits: install it in another terminal, then press Enter to check again and continue to the selection in the same run, or type `s` to skip. Skipping keeps the base setup; later run `dotunnel setup --directory DIR` to enable integrations. `dotunnel doctor` reports the same status and command.
 
-**Do not give the runtime account sudo just for this.** Fixed tasks and CLI jobs run with that account's permissions, so a sudo-capable (especially passwordless) runtime account lets them reach root. Install Bubblewrap once from an administrator account; the package is system-wide.
+**Prefer a runtime account without sudo.** Fixed tasks and CLI jobs run with that account's permissions, so a sudo-capable (especially passwordless) runtime account lets them reach root. The installation offer exists for convenience on single-user servers; on shared or exposed servers install Bubblewrap once from an administrator account (the package is system-wide) and keep the runtime account without sudo.
 
 Only CLIs with a safe executable on PATH are listed. Detection never runs the CLI; if none is installed this step is skipped.
 

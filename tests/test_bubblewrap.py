@@ -45,30 +45,60 @@ class BubblewrapStatusTests(unittest.TestCase):
         self.assertEqual(integrations.bubblewrap_status(bwrap), "missing")
 
 
-class InstallCommandTests(unittest.TestCase):
-    def command(self, text):
+class InstallArgvTests(unittest.TestCase):
+    def argv(self, text):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "os-release"
             path.write_text(text, encoding="utf-8")
-            return integrations.bubblewrap_install_command(path)
+            return integrations.bubblewrap_install_argv(path)
 
     def test_distribution_families_get_their_package_manager(self):
         cases = {
-            'ID=ubuntu\nID_LIKE=debian\n': "sudo apt install bubblewrap",
-            'ID=debian\n': "sudo apt install bubblewrap",
-            'ID="fedora"\n': "sudo dnf install bubblewrap",
-            'ID="rocky"\nID_LIKE="rhel centos fedora"\n': "sudo dnf install bubblewrap",
-            'ID=arch\n': "sudo pacman -S bubblewrap",
-            'ID="opensuse-tumbleweed"\nID_LIKE="opensuse suse"\n': "sudo zypper install bubblewrap",
-            'ID=alpine\n': "sudo apk add bubblewrap",
+            'ID=ubuntu\nID_LIKE=debian\n': ["sudo", "apt-get", "install", "-y", "bubblewrap"],
+            'ID=debian\n': ["sudo", "apt-get", "install", "-y", "bubblewrap"],
+            'ID="fedora"\n': ["sudo", "dnf", "install", "-y", "bubblewrap"],
+            'ID="rocky"\nID_LIKE="rhel centos fedora"\n': ["sudo", "dnf", "install", "-y", "bubblewrap"],
+            'ID=arch\n': ["sudo", "pacman", "-S", "--noconfirm", "bubblewrap"],
+            'ID="opensuse-tumbleweed"\nID_LIKE="opensuse suse"\n': ["sudo", "zypper", "--non-interactive", "install", "bubblewrap"],
+            'ID=alpine\n': ["sudo", "apk", "add", "bubblewrap"],
         }
         for text, expected in cases.items():
             with self.subTest(text=text):
-                self.assertEqual(self.command(text), expected)
+                self.assertEqual(self.argv(text), expected)
 
     def test_unknown_or_unreadable_distribution_has_no_guessed_command(self):
-        self.assertIsNone(self.command('ID=plan9\n'))
-        self.assertIsNone(integrations.bubblewrap_install_command(Path("/nonexistent/os-release")))
+        self.assertIsNone(self.argv('ID=plan9\n'))
+        self.assertIsNone(integrations.bubblewrap_install_argv(Path("/nonexistent/os-release")))
+
+
+class SudoAvailableTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+
+    def sudo(self, code):
+        path = self.base / "sudo"
+        path.write_text(f"#!/bin/sh\nexit {code}\n", encoding="utf-8")
+        path.chmod(0o700)
+        return str(path)
+
+    def test_no_sudo_binary_means_no_sudo(self):
+        self.assertFalse(integrations.sudo_available(sudo=None, group_names={"sudo"}))
+
+    def test_non_interactive_sudo_success_means_sudo(self):
+        self.assertTrue(integrations.sudo_available(sudo=self.sudo(0), group_names=set()))
+
+    def test_password_sudo_is_recognized_by_admin_group(self):
+        for group in ("sudo", "wheel", "admin"):
+            with self.subTest(group=group):
+                self.assertTrue(integrations.sudo_available(sudo=self.sudo(1), group_names={"users", group}))
+
+    def test_ordinary_account_without_sudo_rights(self):
+        self.assertFalse(integrations.sudo_available(sudo=self.sudo(1), group_names={"users", "docker"}))
+
+
+ARGV = ["sudo", "apt-get", "install", "-y", "bubblewrap"]
 
 
 class SetupGatingTests(unittest.TestCase):
@@ -84,49 +114,89 @@ class SetupGatingTests(unittest.TestCase):
         setup.create_artifacts(self.directory, "tunnel_" + "1" * 32, "synthetic-not-a-key")
         self.config = self.directory / "config.json"
 
-    def configure(self, statuses, answers):
-        statuses, answers, selections = iter(statuses), iter(answers), []
+    def configure(self, statuses, answers, *, sudo=False, install_ok=True, installed=None):
+        statuses, answers, selections, installs = iter(statuses), iter(answers), [], []
 
         def selector(available, initial):
             selections.append(set(initial))
             return None
 
+        def install(argv):
+            installs.append(list(argv))
+            return install_ok
+
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             result = self.onboarding.configure_directory(
                 self.directory,
-                {"codex": Path("/unused/codex")},
+                {"codex": Path("/unused/codex")} if installed is None else installed,
                 selector_fn=selector,
                 prompt_fn=lambda _text: next(answers),
                 bubblewrap_fn=lambda: next(statuses),
+                sudo_fn=lambda: sudo,
+                install_fn=install,
+                install_argv_fn=lambda: ARGV,
             )
-        return result, selections, output.getvalue()
+        return result, selections, installs, output.getvalue()
 
-    def test_unusable_bubblewrap_skips_selection_without_changing_registry(self):
+    def test_sudo_account_installs_on_default_yes_and_continues_to_selection(self):
+        _result, selections, installs, _output = self.configure(["missing", "ready"], [""], sudo=True)
+        self.assertEqual(installs, [ARGV])
+        self.assertEqual(selections, [set()])
+
+    def test_declined_install_runs_nothing_and_falls_back_to_guidance(self):
         before = self.config.read_bytes()
-        result, selections, output = self.configure(["missing"], ["s"])
-        self.assertTrue(result)
+        _result, selections, installs, output = self.configure(["missing"], ["n", "s"], sudo=True)
+        self.assertEqual(installs, [])
         self.assertEqual(selections, [])
         self.assertEqual(self.config.read_bytes(), before)
-        self.assertIn("dotunnel setup --directory", output)
+        self.assertIn("sudo apt-get install -y bubblewrap", output)
 
-    def test_installing_then_rechecking_opens_selection_in_same_run(self):
-        result, selections, _output = self.configure(["missing", "unusable", "ready"], ["", ""])
+    def test_invalid_answer_is_asked_again(self):
+        _result, _selections, installs, _output = self.configure(["missing", "ready"], ["maybe", "y"], sudo=True)
+        self.assertEqual(installs, [ARGV])
+
+    def test_account_without_sudo_is_never_offered_installation(self):
+        _result, selections, installs, output = self.configure(["missing"], ["s"], sudo=False)
+        self.assertEqual(installs, [])
+        self.assertEqual(selections, [])
+        self.assertIn("sudo apt-get install -y bubblewrap", output)
+
+    def test_failed_install_keeps_setup_and_waits_for_manual_install(self):
+        # A failed install is not re-probed; the next check is the operator's Enter in the wait loop.
+        _result, selections, installs, output = self.configure(
+            ["missing", "ready"], ["y", ""], sudo=True, install_ok=False,
+        )
+        self.assertIn("did not complete", output)
+        self.assertEqual(installs, [ARGV])
+        self.assertEqual(selections, [set()])
+
+    def test_unusable_bubblewrap_is_not_reinstalled(self):
+        _result, selections, installs, _output = self.configure(["unusable"], ["s"], sudo=True)
+        self.assertEqual(installs, [])
+        self.assertEqual(selections, [])
+
+    def test_install_is_offered_even_before_any_cli_is_installed(self):
+        result, selections, installs, _output = self.configure(["missing", "ready"], [""], sudo=True, installed={})
+        self.assertTrue(result)
+        self.assertEqual(installs, [ARGV])
+        self.assertEqual(selections, [])
+        self.assertEqual(json.loads(self.config.read_text())["tasks"], [])
+
+    def test_manual_install_then_recheck_opens_selection_in_same_run(self):
+        _result, selections, _installs, _output = self.configure(["missing", "unusable", "ready"], ["", ""])
         self.assertEqual(selections, [set()])
 
     def test_ready_bubblewrap_goes_straight_to_selection(self):
-        _result, selections, _output = self.configure(["ready"], [])
+        _result, selections, installs, _output = self.configure(["ready"], [], sudo=True)
+        self.assertEqual(installs, [])
         self.assertEqual(selections, [set()])
 
-    def test_no_installed_cli_reports_status_without_waiting(self):
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output):
-            result = self.onboarding.configure_directory(
-                self.directory, {}, prompt_fn=lambda _text: self.fail("must not wait"),
-                bubblewrap_fn=lambda: "missing",
-            )
+    def test_no_installed_cli_without_sudo_reports_status_without_waiting(self):
+        result, selections, installs, output = self.configure(["missing"], [], installed={})
         self.assertTrue(result)
-        self.assertIn("Bubblewrap", output.getvalue())
+        self.assertEqual(installs, [])
+        self.assertIn("Bubblewrap", output)
         self.assertEqual(json.loads(self.config.read_text())["tasks"], [])
 
 

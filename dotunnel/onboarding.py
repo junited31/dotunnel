@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import stat
 import sys
@@ -886,6 +887,34 @@ def configure_integrations(
         state.close()
 
 
+def _offer_bubblewrap_install(
+    status: str,
+    check: Callable[[], str],
+    prompt_fn: Callable[[str], str] | None,
+    sudo_fn: Callable[[], bool],
+    install_fn: Callable[[list[str]], bool],
+    argv: list[str] | None,
+) -> str:
+    """Offer an approved sudo install when this account can use sudo; otherwise print guidance."""
+    if argv and sudo_fn():
+        command = shlex.join(argv)
+        while True:
+            answer = _prompt(prompt_fn, f"This account can use sudo. Install Bubblewrap now with `{command}`? [Y/n] ").lower()
+            if answer in ("", "y", "yes"):
+                if install_fn(argv):
+                    status = check()
+                    integrations.print_bubblewrap_status(status)
+                    if status != "missing":
+                        return status
+                print("Bubblewrap installation did not complete; nothing else was changed.")
+                break
+            if answer in ("n", "no"):
+                break
+            print("Enter Y or n.")
+    integrations.print_bubblewrap_guidance(argv)
+    return status
+
+
 def configure_directory(
     directory: Path,
     installed: Mapping[str, Path],
@@ -893,6 +922,9 @@ def configure_directory(
     selector_fn: Callable[[Mapping[str, Path], set[str]], set[str] | None] | None = None,
     prompt_fn: Callable[[str], str] | None = None,
     bubblewrap_fn: Callable[[], str] | None = None,
+    sudo_fn: Callable[[], bool] | None = None,
+    install_fn: Callable[[list[str]], bool] | None = None,
+    install_argv_fn: Callable[[], list[str] | None] | None = None,
 ) -> bool:
     available = _available(installed)
     check = (lambda: integrations.bubblewrap_status(_BWRAP)) if bubblewrap_fn is None else bubblewrap_fn
@@ -900,6 +932,15 @@ def configure_directory(
     try:
         status = check()
         integrations.print_bubblewrap_status(status)
+        if status == "missing":
+            status = _offer_bubblewrap_install(
+                status,
+                check,
+                prompt_fn,
+                integrations.sudo_available if sudo_fn is None else sudo_fn,
+                integrations.install_bubblewrap if install_fn is None else install_fn,
+                (integrations.bubblewrap_install_argv if install_argv_fn is None else install_argv_fn)(),
+            )
         if not available:
             print("No installed Codex, Claude Code, or OMP CLI was found on PATH; optional integrations were skipped.")
             print("Install any native CLI separately, then rerun `dotunnel setup` to select its wrapper integration.")
