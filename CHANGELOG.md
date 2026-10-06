@@ -1,12 +1,14 @@
 # Changelog
 
-## Unreleased — installer and documentation
+## 0.1.4
 
-- Add a one-line Linux installer for the pinned 0.1.3 release. It verifies the wheel's size and SHA-256 before isolated, binary-only installation into a user-owned virtualenv, and refuses existing installations or unrelated launchers.
+- Add a one-line Linux installer for the pinned 0.1.4 release. It verifies the wheel's size and SHA-256 before isolated, binary-only installation into a user-owned virtualenv, and refuses existing installations or unrelated launchers.
 - Keep a completed virtualenv and its launcher together even if printing the final installation message fails.
 - Shorten both READMEs to quickstarts and move detailed installation, account, Tunnel, task and CLI guidance into bilingual guides. The repository is now public; fresh installation and manual wheel downloads require no GitHub login.
-- The package version and existing 0.1.3 release wheel are unchanged; no credentials, connections or services are changed by installation.
+- Keep existing release wheels unchanged; no credentials, connections or services are changed by installation.
 - Add an opt-in staged-only Gitleaks pre-commit guard that refuses commits on detection, scanner absence or errors; document private development and detector limitations, and ignore private runtime paths.
+- Run secret scanning, Python 3.11/3.13 regression tests, wheel builds and installed CLI checks on isolated GitHub-hosted Ubuntu CI runners, with read-only permissions and immutable action/checksum pins.
+- Remove the updater's GitHub CLI/login dependency. Fetch public release metadata and wheel assets anonymously over HTTPS using Python's standard library; retain bounded responses, HTTPS-only redirects, wheel identity/size/SHA checks and interactive approval.
 
 ## 0.1.3
 

@@ -18,7 +18,7 @@ The public installer uses `$HOME/.local/share/dotunnel/venv` and exposes `$HOME/
 
 ### Manual installation
 
-To avoid executing a downloaded shell script, download the v0.1.3 release wheel directly. GitHub authentication and `gh` are not required. Check both the expected byte count and SHA-256 **before** installing:
+To avoid executing a downloaded shell script, download the v0.1.4 release wheel directly. GitHub authentication and `gh` are not required. Check both the expected byte count and SHA-256 **before** installing:
 
 ```sh
 set -eu
@@ -30,12 +30,12 @@ if [ -e "$install" ] || [ -L "$install" ]; then
 fi
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-wheel="$tmp/dotunnel-0.1.3-py3-none-any.whl"
+wheel="$tmp/dotunnel-0.1.4-py3-none-any.whl"
 curl --fail --location --output "$wheel" \
-  https://github.com/junited31/dotunnel/releases/download/v0.1.3/dotunnel-0.1.3-py3-none-any.whl
-test "$(wc -c < "$wheel")" -eq 90633
+  https://github.com/junited31/dotunnel/releases/download/v0.1.4/dotunnel-0.1.4-py3-none-any.whl
+test "$(wc -c < "$wheel")" -eq 80847
 printf '%s  %s\n' \
-  fbb6fd8d2ebea7368fe86e5096fe40c1830d829065c81ca3e7ed49e552eb9912 \
+  6ed19be1672ac3961f0e8230abd43af47c08eee4720ad2898b21d3ee6fc1af0f \
   "$wheel" | sha256sum --check -
 python3 -I -m venv "$install"
 "$install/bin/python" -I -m pip --isolated install --only-binary :all: "$wheel"
@@ -74,12 +74,12 @@ Re-running setup with an existing directory only configures optional CLI integra
 
 ### Existing profile migration
 
-Package updates do not rewrite profiles made by v0.1.0–v0.1.2. Before starting one with v0.1.3, edit the trusted `profile.yaml` command in `mcp.commands[].command`: insert `-I` between the absolute Python interpreter and `-m dotunnel`. Keep the interpreter, config path, Tunnel ID and key reference unchanged. New setups already generate the isolated command.
+Package updates do not rewrite profiles made by v0.1.0–v0.1.2. Before starting one with v0.1.3 or later, edit the trusted `profile.yaml` command in `mcp.commands[].command`: insert `-I` between the absolute Python interpreter and `-m dotunnel`. Keep the interpreter, config path, Tunnel ID and key reference unchanged. New setups already generate the isolated command.
 
 ## 4. Diagnose, update and disconnect
 
 - **`dotunnel doctor`** is read-only: it starts no client or model and changes no settings. It checks setup/configuration, the selected client and optional Bubblewrap status. Valid config or auth-file metadata alone is not proof of provider authentication. Unless live/ready and a successful control-plane poll are observed, doctor exits 2. Use `--directory DIR` and, if needed, `--tunnel-client /absolute/path` to select paths.
-- **`dotunnel update`** checks the latest stable GitHub release and asks before installing. It is limited to non-root Linux, non-editable venv installations; it does not downgrade a newer version. The release wheel name, size, GitHub-reported SHA-256 and package name/version are checked before binary-only installation. Update uses GitHub CLI (`gh`); install it and authenticate with `gh auth login`. Lookup failure, a missing release, EOF or non-interactive input fails closed (exit 2); Ctrl-C exits 130. A partial-install rollback is not guaranteed. Update changes no config, credentials or Tunnel settings and restarts no running process; restart idle MCP/client processes yourself. `gh` is not required for a fresh install.
+- **`dotunnel update`** checks the latest stable public GitHub release over HTTPS without GitHub CLI or login and asks before installing. It is limited to non-root Linux, non-editable venv installations; it does not downgrade a newer version. The release wheel name, size, GitHub-reported SHA-256 and package name/version are checked before binary-only installation. Network/TLS errors, GitHub rate limits, a missing release, EOF or non-interactive input fail closed (exit 2); Ctrl-C exits 130. A partial-install rollback is not guaranteed. Update changes no config, credentials or Tunnel settings and restarts no running process; restart idle MCP/client processes yourself. Versions before 0.1.4 still use their old updater: use that updater once or manually install the verified current wheel to obtain the anonymous updater.
 - **Disconnecting** a foreground client with Ctrl-C stops that client but does not revoke access. Depending on your setup, fully removing access may require disconnecting/deleting the ChatGPT app, removing the Tunnel association and revoking the runtime key. Data already sent to ChatGPT is not recalled. The project creates no persistent service; manage any service you set up according to your own server policy.
 
 ## 5. Workspace, tasks and MCP tools
@@ -131,6 +131,8 @@ gitleaks git --log-opts=--all --redact=100 --no-banner
 ```
 
 The executable `.githooks/pre-commit` scans staged changes only. A detected secret, missing scanner, scan timeout or scanner error rejects the commit. Logs redact detected secret values. An unstaged edit is not part of the commit and is not scanned by this hook.
+
+Public push/PR CI also scans fetched Git history, runs the Linux regression suite on Python 3.11 and 3.13, builds a wheel and exercises its installed CLI outside the checkout. It uses isolated GitHub-hosted Ubuntu runners with read-only permissions and no operator/worker credentials. CI failure reports a failed check; branch-protection rules are a separate repository policy.
 
 Before pushing, review `git diff --cached` locally, verify that runtime/key files are absent, and run the history scan above on the source repository—not the runtime directory. Do not paste sensitive diffs or scan reports into public issues. Enable GitHub secret scanning and push protection on your repository where available. Neither detector catches every secret; hooks can be bypassed and provider push protection has pattern and bypass limitations. If a real secret is committed or pushed, revoke/rotate it first; deleting the latest file does not remove Git history.
 

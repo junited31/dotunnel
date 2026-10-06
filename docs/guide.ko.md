@@ -18,7 +18,7 @@ front page의 한 줄 명령은 GitHub 로그인 없이 공개 저장소 `main`�
 
 ### 수동 설치
 
-내려받은 shell 스크립트를 실행하고 싶지 않다면 v0.1.3 release wheel을 직접 다운로드하세요. GitHub 로그인과 `gh`는 필요하지 않습니다. 설치 **전에** 기대하는 byte 수와 SHA-256을 모두 확인하세요.
+내려받은 shell 스크립트를 실행하고 싶지 않다면 v0.1.4 release wheel을 직접 다운로드하세요. GitHub 로그인과 `gh`는 필요하지 않습니다. 설치 **전에** 기대하는 byte 수와 SHA-256을 모두 확인하세요.
 
 ```sh
 set -eu
@@ -30,12 +30,12 @@ if [ -e "$install" ] || [ -L "$install" ]; then
 fi
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-wheel="$tmp/dotunnel-0.1.3-py3-none-any.whl"
+wheel="$tmp/dotunnel-0.1.4-py3-none-any.whl"
 curl --fail --location --output "$wheel" \
-  https://github.com/junited31/dotunnel/releases/download/v0.1.3/dotunnel-0.1.3-py3-none-any.whl
-test "$(wc -c < "$wheel")" -eq 90633
+  https://github.com/junited31/dotunnel/releases/download/v0.1.4/dotunnel-0.1.4-py3-none-any.whl
+test "$(wc -c < "$wheel")" -eq 80847
 printf '%s  %s\n' \
-  fbb6fd8d2ebea7368fe86e5096fe40c1830d829065c81ca3e7ed49e552eb9912 \
+  6ed19be1672ac3961f0e8230abd43af47c08eee4720ad2898b21d3ee6fc1af0f \
   "$wheel" | sha256sum --check -
 python3 -I -m venv "$install"
 "$install/bin/python" -I -m pip --isolated install --only-binary :all: "$wheel"
@@ -74,12 +74,12 @@ setup은 공식 client의 설정 doctor를 확인한 뒤 명시적으로 동의�
 
 ### 기존 profile migration
 
-v0.1.0–v0.1.2에서 만든 profile은 패키지 업데이트가 수정하지 않습니다. v0.1.3으로 시작하기 전에 trusted `profile.yaml`의 `mcp.commands[].command`에서 절대 Python 경로와 `-m dotunnel` 사이에 `-I`를 넣으세요. interpreter, config 경로, Tunnel ID, key 참조는 유지합니다. 새 setup은 이미 격리 명령을 만듭니다.
+v0.1.0–v0.1.2에서 만든 profile은 패키지 업데이트가 수정하지 않습니다. v0.1.3 이상으로 시작하기 전에 trusted `profile.yaml`의 `mcp.commands[].command`에서 절대 Python 경로와 `-m dotunnel` 사이에 `-I`를 넣으세요. interpreter, config 경로, Tunnel ID, key 참조는 유지합니다. 새 setup은 이미 격리 명령을 만듭니다.
 
 ## 4. 진단, 업데이트와 연결 해제
 
 - **`dotunnel doctor`**는 읽기 전용입니다. client나 모델을 실행하거나 설정을 변경하지 않습니다. setup/config, 선택 client, 선택 Bubblewrap 상태를 검사합니다. 유효한 config나 인증 파일 metadata만으로 provider 인증 성공을 입증할 수 없습니다. live/ready와 성공한 control-plane poll을 관찰하지 못하면 exit 2입니다. `--directory DIR`, 필요하면 `--tunnel-client /절대/경로`로 경로를 지정하세요.
-- **`dotunnel update`**는 최신 안정 GitHub release를 확인하고 설치 전에 묻습니다. non-root Linux의 non-editable venv 설치만 지원하며 더 높은 설치 버전으로 downgrade하지 않습니다. 설치 전에 release wheel 이름·크기·GitHub SHA-256과 package name/version을 확인한 뒤 binary-only 설치를 합니다. 업데이트는 GitHub CLI(`gh`)를 사용하므로 설치 후 `gh auth login`으로 인증하세요. 조회 실패, release 부재, EOF 또는 비대화형 입력은 설치하지 않고 exit 2이며 Ctrl-C는 exit 130입니다. 부분 설치 rollback은 보장되지 않습니다. config, credential, Tunnel 설정을 바꾸거나 실행 중인 프로세스를 재시작하지 않습니다. 작업이 끝난 뒤 MCP/client를 직접 재시작하세요. 새 설치에는 `gh`가 필요하지 않습니다.
+- **`dotunnel update`**는 GitHub CLI나 로그인 없이 HTTPS로 최신 안정 public GitHub release를 확인하고 설치 전에 묻습니다. non-root Linux의 non-editable venv 설치만 지원하며 더 높은 설치 버전으로 downgrade하지 않습니다. 설치 전에 release wheel 이름·크기·GitHub SHA-256과 package name/version을 확인한 뒤 binary-only 설치를 합니다. network/TLS 오류, GitHub rate limit, release 부재, EOF 또는 비대화형 입력은 설치하지 않고 exit 2이며 Ctrl-C는 exit 130입니다. 부분 설치 rollback은 보장되지 않습니다. config, credential, Tunnel 설정을 바꾸거나 실행 중인 프로세스를 재시작하지 않습니다. 작업이 끝난 뒤 MCP/client를 직접 재시작하세요. 0.1.4 이전 설치본에는 구 updater가 남아 있으므로 기존 updater를 한 번 사용하거나 검증된 최신 wheel을 수동 설치해 새 updater를 받으세요.
 - **연결 해제:** foreground client에 Ctrl-C를 보내면 해당 client는 멈추지만 접근 권한까지 취소하지는 않습니다. 완전한 해제에는 ChatGPT 앱 연결 해제/삭제, Tunnel association 제거, runtime key 폐기가 필요할 수 있습니다. ChatGPT에 이미 전송된 데이터는 회수되지 않습니다. 프로젝트는 지속 서비스 생성을 하지 않습니다. 직접 구성한 서비스가 있다면 서버 정책에 따라 관리하세요.
 
 ## 5. Workspace, 작업과 MCP 도구
@@ -131,6 +131,8 @@ gitleaks git --log-opts=--all --redact=100 --no-banner
 ```
 
 실행 가능한 `.githooks/pre-commit`은 staged 변경만 검사합니다. secret 탐지, 검사기 부재, 검사 timeout, 검사기 오류 시 커밋을 거부하고 탐지 값은 log에서 가립니다. unstaged 변경은 커밋에 포함되지 않으며 이 hook의 검사 대상도 아닙니다.
+
+public push/PR CI도 fetched Git 이력을 검사하고 Python 3.11·3.13에서 Linux 회귀 테스트, wheel 빌드, checkout 밖에서 설치된 CLI 검사를 실행합니다. 읽기 전용 권한의 격리된 GitHub-hosted Ubuntu runner를 사용하며 운영자/worker credential을 제공하지 않습니다. CI 실패는 failed check로 보고됩니다. branch protection은 별도 저장소 정책입니다.
 
 push 전 `git diff --cached`를 로컬에서 검토하고 runtime/key 파일이 없는지 확인하세요. 위 history 검사는 runtime 디렉터리가 아니라 source 저장소에서 실행합니다. 민감한 diff·검사 보고서를 공개 issue에 붙이지 마세요. 지원되는 저장소에서는 GitHub secret scanning·push protection도 켜세요. 모든 secret을 탐지할 수는 없고 hook은 우회 가능하며 provider push protection에도 패턴·우회 한계가 있습니다. 실제 secret이 commit/push되면 먼저 폐기·교체하세요. 최신 파일을 삭제해도 Git 이력에는 남습니다.
 
