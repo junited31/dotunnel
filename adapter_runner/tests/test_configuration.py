@@ -171,10 +171,14 @@ class ConfigurationTests(unittest.TestCase):
         self.state.chmod(0o755)
         self.assert_invalid()
         self.state.chmod(0o700)
+        original_executable = self.private / "owned-executable"
+        original_executable.write_bytes(b"#!/bin/sh\nexit 0\n")
+        original_executable.chmod(0o700)
         linked_executable = self.private / "python-hardlink"
-        os.link(self.executable, linked_executable)
+        os.link(original_executable, linked_executable)
         value = self.configuration()
         value["backend"]["argv"][0] = str(linked_executable)
+        value["backend"]["digest"] = "sha256:" + hashlib.sha256(original_executable.read_bytes()).hexdigest()
         self.write_config(value)
         self.assert_invalid()
 
