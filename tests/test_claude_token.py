@@ -7,7 +7,7 @@ import termios
 import textwrap
 import unittest
 
-from dotunnel.claude_token import extract_token, run_in_pty, save_token
+from dotunnel.claude_token import extract_token, run_in_pty, save_token, validate_token
 
 TOKEN = "sk-ant-oat01-Synthetic_token-value_0123456789abcdef"
 
@@ -38,6 +38,19 @@ class SaveTokenTests(unittest.TestCase):
 
     def tearDown(self):
         self.directory.cleanup()
+
+    def test_maximum_token_fits_the_4096_byte_consumer_limit(self):
+        maximum = "A" * 4095
+        self.assertEqual(validate_token(maximum), maximum)
+        save_token(self.path, maximum, replace=False)
+        self.assertEqual(self.path.stat().st_size, 4096)
+
+        too_long = maximum + "A"
+        with self.assertRaises(ValueError):
+            validate_token(too_long)
+        with self.assertRaises(ValueError):
+            save_token(self.path, too_long, replace=True)
+        self.assertEqual(self.path.stat().st_size, 4096)
 
     def test_new_token_file_is_private_and_existing_file_is_not_overwritten(self):
         save_token(self.path, TOKEN, replace=False)

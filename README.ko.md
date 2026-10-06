@@ -1,5 +1,7 @@
 # dotunnel
 
+<p align="center"><img src="assets/dotunnel.png" alt="dotunnel: 속이 뚫린 원기둥으로 형상화한 터널" width="240"></p>
+
 [English](README.md) | **한국어**
 
 Linux용 **자체 설치형 stdio MCP 서버**와 private Secure MCP Tunnel 연결 도우미입니다. ChatGPT가 지정한 작업 디렉터리의 파일을 읽고 수정하며, 서버 관리자가 미리 정의한 고정 작업만 실행할 수 있습니다. 공개 HTTP listener나 tmux 같은 터미널 멀티플렉서는 필요하지 않습니다.
@@ -59,15 +61,21 @@ workspace 안에는 프로그램을 설치하지 마세요. 시스템 Python이�
 
 ```sh
 umask 077
-VERSION=0.1.0
+VERSION=0.1.3
 curl -fLO "https://github.com/junited31/dotunnel/releases/download/v${VERSION}/dotunnel-${VERSION}-py3-none-any.whl"
+sha256sum "dotunnel-${VERSION}-py3-none-any.whl"
+```
+
+release asset의 SHA-256과 비교하고 **불일치하면 중단하세요.** 검증한 뒤에만 설치합니다.
+
+```sh
 uv venv --python 3.13 ~/app/venv
 uv pip install --python ~/app/venv/bin/python --only-binary :all: "./dotunnel-${VERSION}-py3-none-any.whl"
 . ~/app/venv/bin/activate
 dotunnel help
 ```
 
-release 페이지에 표시되는 SHA-256과 내려받은 파일의 `sha256sum` 값을 비교하세요. `uv` 없이 `python -m venv`와 `pip install --only-binary :all: ./dotunnel-...whl`도 사용할 수 있습니다. 설치에 키/토큰은 필요하지 않습니다. 이후 업데이트는 `dotunnel update`로 합니다.
+**설치 전에** 출력된 SHA-256을 release asset의 digest와 비교하고 정확히 일치할 때만 다음 설치 명령을 실행하세요. `uv` 없이 `python -m venv`와 `pip install --only-binary :all: ./dotunnel-...whl`도 사용할 수 있습니다. 설치에 키/토큰은 필요하지 않습니다. 이후 업데이트는 `dotunnel update`로 합니다.
 
 ## 사용자용 명령
 
@@ -123,6 +131,8 @@ dotunnel setup \
 
 기본 디렉터리는 현재 위치의 `.dotunnel-setup`입니다. 새 설정의 부모와 client/CLI 실행 파일·인증 참조의 상위 디렉터리는 root/현재 사용자 소유이며 다른 사용자가 쓸 수 없어야 합니다(trusted-owner sticky `/tmp`는 허용, 일반 group/world-writable·타인 소유 부모·symlink는 거부). 기존 설정에 `dotunnel setup --directory DIR`를 다시 실행하면 아래 선택 연동만 재설정하며 key/profile을 읽거나 덮어쓰지 않습니다. 새 Tunnel/키는 새 디렉터리에 설정하고, 기존 연결을 켜려면 기존 profile의 `run` 명령을 쓰세요.
 
+**0.1.0–0.1.2에서 만든 기존 profile:** 패키지 업데이트는 profile을 다시 쓰지 않습니다. 다음 연결 시작 전에 trusted `profile.yaml`의 `mcp.commands[].command`에서 절대 경로 Python interpreter와 `-m dotunnel` 사이에 `-I`를 추가하세요. interpreter·config 경로·Tunnel ID·key 참조는 그대로 유지합니다. 새 setup은 격리 명령을 자동 생성하며, workspace의 `dotunnel.py` 같은 파일이 설치된 모듈을 대신 실행하지 못하게 합니다. 새 설정과 기존 설정 모두 대화형 터미널이 필요합니다.
+
 setup은 한 흐름으로 안내합니다.
 
 1. [Platform Tunnel 설정](https://platform.openai.com/settings/organization/tunnels): 생성/편집은 Tunnels **Read+Manage**. 소유 조직과 대상 ChatGPT workspace association을 함께 설정합니다.
@@ -142,7 +152,7 @@ ChatGPT 앱에는 Platform runtime key를 입력하지 않습니다. 연결 방�
 setup은 구성 doctor 다음에 항상 Bubblewrap을 확인합니다. `/usr/bin/bwrap`이 있는지와 **CLI 작업이 쓰는 격리 namespace를 실제로 만들 수 있는지**를 함께 봅니다. 기본 기능(Tunnel, 파일 도구, 고정 작업)에는 필요하지 않습니다.
 
 - **ready:** CLI가 설치돼 있으면 선택 목록을 엽니다.
-- **설치 안 됨, sudo 가능 계정:** 배포판에 맞는 명령(예: `sudo apt-get install -y bubblewrap`)으로 지금 설치할지 `[Y/n]`으로 묻습니다. Enter/y면 같은 터미널에서 실행하고, 필요하면 sudo가 비밀번호를 묻습니다. 설치 후 다시 확인합니다. n이면 설치하지 않습니다. sudo 가능 여부는 비밀번호 없는 `sudo -n true` 또는 `sudo`/`wheel`/`admin` 그룹 소속으로 판단하며, 설치가 실패하면 아래 안내로 넘어갑니다.
+- **설치 안 됨, sudo 가능으로 추정:** trusted 절대 경로 시스템 명령(예: `/usr/bin/sudo /usr/bin/apt-get install -y bubblewrap`)으로 지금 설치할지 `[Y/n]`으로 묻습니다. Enter/y면 같은 터미널에서 실행하고, 필요하면 sudo가 비밀번호를 묻습니다. 설치 후 다시 확인합니다. n이면 설치하지 않습니다. 비대화형 권한 목록 조회(`sudo -n -l`) 성공 또는 `sudo`/`wheel`/`admin` 그룹 소속은 설치 가능성을 추정하는 신호일 뿐 설치 권한을 보장하지 않습니다. 실패하면 아래 안내로 넘어갑니다.
 - **설치 안 됨, sudo 불가:** 관리자가 실행할 명령을 보여 줍니다. `sudo apt-get install -y bubblewrap`(Debian/Ubuntu), `sudo dnf install -y bubblewrap`(Fedora/RHEL), `sudo pacman -S --noconfirm bubblewrap`(Arch), `sudo zypper --non-interactive install bubblewrap`(openSUSE), `sudo apk add bubblewrap`(Alpine). 모르는 배포판이면 패키지 이름만 안내합니다.
 - **설치됐지만 사용 불가:** 커널·AppArmor·컨테이너 정책이 비특권 user namespace를 막고 있습니다. 관리자가 bwrap에 허용해야 하며, 재설치로는 해결되지 않으므로 설치를 제안하지 않습니다.
 
@@ -273,11 +283,13 @@ Claude는 `--safe-mode --restricted`와 고정 파일 도구만 사용합니다(
 
 성공 output은 `reviewed` 또는 `candidate_ready`, `report_path`·`report_sha256` 등을 담습니다. target당 최대 32개 UTF-8 regular file, 파일당 64 KiB입니다. 완료 후 `read_file`로 `cli-results/<backend>/<job_id>/report.json`과 report가 열거한 diff chunk(최대 48 KiB)를 읽어 SHA-256을 대조하세요. `candidate_ready`는 **원본에 적용됐거나 문제가 고쳐졌다는 뜻이 아닙니다.** 모델 summary는 검증 증거가 아니며 모든 report의 `verification`은 `not_run`입니다.
 
-네이티브 출력(logical capture 1 MiB)과 실행 시간(200초)은 제한되며 실패 시 raw CLI 로그 대신 고정 진단만 반환합니다. wrapper는 실패한 job을 다시 호출하지 않습니다. 실패 output은 `{"status":"failed","error_code":"NATIVE_FAILED"}`에 다음 필드만 덧붙입니다.
+네이티브 출력(logical capture 1 MiB)과 실행 시간(200초)은 제한되며 실패 시 raw CLI 로그 대신 고정 진단만 반환합니다. wrapper는 실패한 job을 다시 호출하지 않습니다. **네이티브 실행 실패**의 output은 `{"status":"failed","error_code":"NATIVE_FAILED"}`에 다음 필드만 덧붙입니다.
 
 - `native_error_code`: `SANDBOX_UNAVAILABLE`, `NATIVE_UNAVAILABLE`, `TIMEOUT`, `OUTPUT_LIMIT`, `NATIVE_FAILURE`, `INVALID_NATIVE_STREAM`.
 - `native_detail`: `AUTH_FAILED`(API 401/403), `RATE_LIMITED`(429), `PROVIDER_ERROR`, `PERMISSION_DENIED`, `UNSUCCESSFUL_RESULT`, `INVALID_RESULT`, `EMPTY_RESULT`, `SUMMARY_TOO_LARGE`, `NO_RESULT`, `INVALID_STREAM`, `EXIT_NONZERO`.
 - `native_exit_code`, `native_elapsed_seconds`: 값이 없거나 형식이 맞지 않으면 생략합니다.
+
+그 밖의 job 실패는 `status: failed`와 `CANDIDATE_INVALID`(안전하지 않은 후보), `SOURCE_CONFLICT`(실행 중 source 변경), `ARTIFACT_FAILURE`(결과 게시 실패), `JOB_FAILED`(예상하지 못한 실패)를 반환합니다. 입력 오류는 `status: rejected`와 `INVALID_REQUEST` 또는 `INVALID_CONFIG`를 반환합니다. 실패는 exit 1, 입력 거부는 exit 2입니다. 이런 안전 검사 거부를 성공한 후보로 취급하거나 자동 재시도하지 마세요.
 
 OMP JSON은 프레임별로 엄격히 검증하며 누적 진행·도구 본문을 저장하지 않습니다. 보관 한도 1 MiB는 프레임 최대 980,992바이트, 최종 summary 2 KiB, stderr 64 KiB로 나눕니다. 대화 전체를 담는 단일 프레임이 한도를 넘으면 실패합니다. 같은 UID로 실행되는 CLI는 참조한 credential을 읽을 수 있고 provider 네트워크를 공유하므로 credential 비밀성이나 외부 전송 방지를 보장하지 않습니다. 허용 source·instruction·summary·diff 자체에도 민감한 데이터가 있을 수 있습니다.
 

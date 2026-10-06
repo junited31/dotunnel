@@ -430,12 +430,61 @@ class OnboardingTests(unittest.TestCase):
         self.assertFalse((self.directory / "cli-jobs").exists())
         self.assertFalse((self.directory / "workspace" / "dotunnel-requests").exists())
 
+    def test_existing_setup_rejects_piped_default_yes_before_admin_checks(self):
+        config_path = self._create_setup()
+        before = config_path.read_bytes()
+
+        class TerminalOutput(io.StringIO):
+            def isatty(self):
+                return True
+
+        stdout = TerminalOutput()
+        stderr = TerminalOutput()
+        with patch.object(self.onboarding.sys, "platform", "linux"), patch.object(
+            self.onboarding.os, "getuid", return_value=1000
+        ), patch.object(self.onboarding.sys, "stdin", io.StringIO("\n")), patch.object(
+            self.onboarding.sys, "stdout", stdout
+        ), patch.object(self.onboarding.sys, "stderr", stderr), patch.object(
+            self.onboarding.integrations, "discover_clis"
+        ) as discover, patch.object(
+            self.onboarding.integrations, "bubblewrap_status"
+        ) as bubblewrap_status, patch.object(
+            self.onboarding.integrations, "sudo_available"
+        ) as sudo_available, patch.object(
+            self.onboarding.integrations, "install_bubblewrap"
+        ) as install_bubblewrap, patch.object(
+            self.onboarding, "configure_directory"
+        ) as configure:
+            result = self.onboarding.main(["--directory", str(self.directory)])
+
+        self.assertEqual(result, 2)
+        self.assertIn("interactive terminal", stderr.getvalue())
+        discover.assert_not_called()
+        bubblewrap_status.assert_not_called()
+        sudo_available.assert_not_called()
+        install_bubblewrap.assert_not_called()
+        configure.assert_not_called()
+        self.assertEqual(config_path.read_bytes(), before)
+
     def test_cancelled_setup_exits_without_changing_existing_registry(self):
         config_path = self._create_setup()
         before = config_path.read_bytes()
         profile_before = self._file_identity(self.directory / "profile.yaml")
         key_before = self._file_identity(self.directory / "runtime-api-key")
-        with patch.object(self.onboarding.integrations, "discover_clis", return_value={
+
+        class TerminalInput(io.StringIO):
+            def isatty(self):
+                return True
+
+        class TerminalOutput(io.StringIO):
+            def isatty(self):
+                return True
+
+        with patch.object(self.onboarding.sys, "stdin", TerminalInput()), patch.object(
+            self.onboarding.sys, "stdout", TerminalOutput()
+        ), patch.object(self.onboarding.sys, "stderr", TerminalOutput()), patch.object(
+            self.onboarding.os, "getuid", return_value=1000
+        ), patch.object(self.onboarding.integrations, "discover_clis", return_value={
             "codex": Path("/unused/codex"),
         }), patch.object(self.onboarding.integrations, "bubblewrap_status", return_value="ready"), \
                 patch.object(self.onboarding, "select_clis", return_value=None):

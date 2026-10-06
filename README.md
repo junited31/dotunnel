@@ -1,5 +1,7 @@
 # dotunnel
 
+<p align="center"><img src="assets/dotunnel.png" alt="dotunnel: a hollow cylinder forming a tunnel" width="240"></p>
+
 **English** | [한국어](README.ko.md)
 
 A **self-hosted stdio MCP server** for Linux plus a helper for connecting it through a private Secure MCP Tunnel. ChatGPT can read and modify files in one designated working directory and run only the fixed tasks that the server administrator has defined. It needs no public HTTP listener and no terminal multiplexer such as tmux.
@@ -59,15 +61,21 @@ Do not install the program inside the workspace, into the system Python or into 
 
 ```sh
 umask 077
-VERSION=0.1.0
+VERSION=0.1.3
 curl -fLO "https://github.com/junited31/dotunnel/releases/download/v${VERSION}/dotunnel-${VERSION}-py3-none-any.whl"
+sha256sum "dotunnel-${VERSION}-py3-none-any.whl"
+```
+
+Compare with the release asset's SHA-256. **Stop if it does not match.** Only after verification, install:
+
+```sh
 uv venv --python 3.13 ~/app/venv
 uv pip install --python ~/app/venv/bin/python --only-binary :all: "./dotunnel-${VERSION}-py3-none-any.whl"
 . ~/app/venv/bin/activate
 dotunnel help
 ```
 
-Compare the SHA-256 shown on the release page with `sha256sum` of the downloaded file. Without `uv`, `python -m venv` and `pip install --only-binary :all: ./dotunnel-...whl` also work. Installation needs no keys or tokens. Later updates use `dotunnel update`.
+Verify the downloaded wheel **before installing it**: compare the printed SHA-256 with the release asset's digest and continue only on an exact match. Without `uv`, `python -m venv` and `pip install --only-binary :all: ./dotunnel-...whl` also work. Installation needs no keys or tokens. Later updates use `dotunnel update`.
 
 ## Commands
 
@@ -123,6 +131,8 @@ dotunnel setup \
 
 The default directory is `.dotunnel-setup` in the current directory. The parent of a new setup, and the parent directories of client/CLI executables and auth references, must be owned by root or the current user and not writable by others (a trusted-owner sticky `/tmp` is allowed; other group/world-writable parents, parents owned by other users and symlinks are refused). Re-running `dotunnel setup --directory DIR` on an existing setup reconfigures only the optional integrations below; it never reads or overwrites the key/profile. Configure a new Tunnel/key in a new directory, and start an existing connection with the existing profile's `run` command.
 
+**Existing profiles from 0.1.0–0.1.2:** updating the package does not rewrite profiles. Before the next connection start, add `-I` between the absolute Python interpreter and `-m dotunnel` in `mcp.commands[].command` in your trusted `profile.yaml`. Keep the interpreter, config path, Tunnel ID and key reference unchanged. New setups generate this isolated command automatically; it prevents workspace files such as `dotunnel.py` from replacing the installed module. Both new and existing setup require an interactive terminal.
+
 setup walks through one flow:
 
 1. [Platform Tunnel settings](https://platform.openai.com/settings/organization/tunnels): creating/editing needs Tunnels **Read+Manage**. Set both the owning organization and the target ChatGPT workspace association.
@@ -142,7 +152,7 @@ Never enter the Platform runtime key in the ChatGPT app. The connection type is 
 After the configuration doctor, setup always checks Bubblewrap: whether `/usr/bin/bwrap` exists **and** can actually create the isolated namespaces CLI jobs use. The core (Tunnel, file tools, fixed tasks) never needs it.
 
 - **ready:** CLI selection opens (if any CLI is installed).
-- **not installed, account can use sudo:** setup asks whether to install it now with the distribution's command, e.g. `sudo apt-get install -y bubblewrap`, answered with `[Y/n]`. Enter/y runs it in the same terminal, where sudo may ask for your password, then checks again. n skips installation. Detection uses passwordless `sudo -n true` or membership in the `sudo`/`wheel`/`admin` group; if the install fails, setup falls back to the guidance below.
+- **not installed, sudo appears available:** setup offers installation with trusted absolute system commands, e.g. `/usr/bin/sudo /usr/bin/apt-get install -y bubblewrap`, answered with `[Y/n]`. Enter/y runs it in the same terminal, where sudo may ask for your password, then checks again. n skips installation. A successful non-interactive permission listing (`sudo -n -l`) or membership in `sudo`/`wheel`/`admin` is only a best-effort signal, not a guarantee of installation permission. On failure, setup falls back to the guidance below.
 - **not installed, no sudo:** setup shows the command for an administrator to run: `sudo apt-get install -y bubblewrap` (Debian/Ubuntu), `sudo dnf install -y bubblewrap` (Fedora/RHEL), `sudo pacman -S --noconfirm bubblewrap` (Arch), `sudo zypper --non-interactive install bubblewrap` (openSUSE) or `sudo apk add bubblewrap` (Alpine). Unknown distributions get the package name only.
 - **installed but unusable:** the kernel, AppArmor or container policy blocks unprivileged user namespaces; an administrator must allow them for bwrap. Reinstalling does not help, so it is not offered.
 
@@ -273,11 +283,13 @@ Callers write only these three fields to the configured request file with `write
 
 Success output contains `reviewed` or `candidate_ready`, `report_path`, `report_sha256` and more. Limits: 32 UTF-8 regular files per target, 64 KiB per file. When done, `read_file` the `cli-results/<backend>/<job_id>/report.json` and every diff chunk it lists (at most 48 KiB each), and check their SHA-256. `candidate_ready` **does not mean the change was applied to originals or that the problem is fixed.** The model summary is not verification evidence, and every report has `verification: not_run`.
 
-Native output (1 MiB logical capture) and run time (200 s) are bounded; failures return fixed diagnostics instead of raw CLI logs. The wrapper never re-runs a failed job. Failure output is `{"status":"failed","error_code":"NATIVE_FAILED"}` plus only these fields:
+Native output (1 MiB logical capture) and run time (200 s) are bounded; failures return fixed diagnostics instead of raw CLI logs. The wrapper never re-runs a failed job. **Native execution failures** return `{"status":"failed","error_code":"NATIVE_FAILED"}` plus only these fields:
 
 - `native_error_code`: `SANDBOX_UNAVAILABLE`, `NATIVE_UNAVAILABLE`, `TIMEOUT`, `OUTPUT_LIMIT`, `NATIVE_FAILURE`, `INVALID_NATIVE_STREAM`.
 - `native_detail`: `AUTH_FAILED` (API 401/403), `RATE_LIMITED` (429), `PROVIDER_ERROR`, `PERMISSION_DENIED`, `UNSUCCESSFUL_RESULT`, `INVALID_RESULT`, `EMPTY_RESULT`, `SUMMARY_TOO_LARGE`, `NO_RESULT`, `INVALID_STREAM`, `EXIT_NONZERO`.
 - `native_exit_code`, `native_elapsed_seconds`: omitted when absent or malformed.
+
+Other job failures return `status: failed` with `CANDIDATE_INVALID` (unsafe candidate), `SOURCE_CONFLICT` (sources changed during execution), `ARTIFACT_FAILURE` (result publication failed), or `JOB_FAILED` (unexpected failure). Invalid inputs return `status: rejected` with `INVALID_REQUEST` or `INVALID_CONFIG`. Failed jobs exit 1; rejected inputs exit 2. Do not treat these safety rejections as a successful candidate or automatically retry them.
 
 OMP JSON is validated frame by frame and cumulative progress/tool bodies are not stored. The 1 MiB budget is split into frames of at most 980,992 bytes, a 2 KiB final summary and 64 KiB of stderr. A single frame containing the whole conversation that exceeds the limit fails. A CLI running as the same UID can read its referenced credentials and shares provider networking, so neither credential secrecy nor exfiltration prevention is guaranteed. Allowed sources, instructions, summaries and diffs may themselves contain sensitive data.
 

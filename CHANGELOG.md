@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.3
+
+- Harden Bubblewrap installation against inherited PATH substitution of sudo or package-manager commands. Administrative execution uses trusted absolute system executables.
+- Require interactive terminal approval for existing setup too; redirected blank input must not authorize a system package install.
+- Generate isolated `python -I -m dotunnel` MCP commands so a writable workspace cannot shadow the installed module. Existing 0.1.0–0.1.2 profiles need the documented `-I` addition before their next connection start; package updates do not modify profiles or restart connections.
+- Cap saved Claude token values at 4095 ASCII characters, leaving room for the newline within the existing 4096-byte token-file limit.
+- Move initial wheel checksum verification before installation, document non-native failure/rejection codes, and add the hollow-cylinder tunnel artwork to both READMEs.
+
 ## 0.1.2
 
 - When Bubblewrap is missing and the setup account can use sudo (passwordless `sudo -n true`, or membership in `sudo`/`wheel`/`admin`), setup offers to install it with the distribution's command and `[Y/n]` (Enter approves). The command runs on the same terminal so sudo can ask for a password, then setup re-probes and continues. Without sudo, or after a declined or failed install, setup shows the command for an administrator. An installed but unusable bwrap is never reinstalled.

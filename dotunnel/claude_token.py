@@ -30,9 +30,10 @@ from .setup import _trusted_parent
 _COLUMNS = 400
 _CAPTURE_LIMIT = 1024 * 1024
 _TOKEN_FILE_LIMIT = 4096
+_TOKEN_MAX_CHARS = _TOKEN_FILE_LIMIT - 1  # save_token appends one newline
 # Observed subscription OAuth token shape; anything else falls back to paste.
 _DETECTED_TOKEN = re.compile(rb"sk-ant-oat\d\d-[A-Za-z0-9_-]{20,1000}")
-_VALID_TOKEN = re.compile(r"[A-Za-z0-9._~+/=-]{20,4096}")
+_VALID_TOKEN = re.compile(rf"[A-Za-z0-9._~+/=-]{{20,{_TOKEN_MAX_CHARS}}}")
 _TERMINAL_CONTROL = re.compile(
     rb"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]"
 )
@@ -47,7 +48,7 @@ def extract_token(output: bytes) -> str | None:
 
 def validate_token(token: str) -> str:
     if not isinstance(token, str) or not _VALID_TOKEN.fullmatch(token):
-        raise ValueError("Token must be one value of 20-4096 URL-safe characters")
+        raise ValueError(f"Token must be one value of 20-{_TOKEN_MAX_CHARS} URL-safe characters")
     return token
 
 

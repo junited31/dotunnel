@@ -22,7 +22,7 @@ _MAX_THREAD_ID_BYTES = 512
 _CLIENT_INFO = {
     "name": "dotunnel",
     "title": "Dotunnel",
-    "version": "0.1.2",
+    "version": "0.1.3",
 }
 _DEVELOPER_INSTRUCTIONS = (
     "Work only with the candidate file tools supplied for this thread. Do not use shell, "

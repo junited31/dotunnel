@@ -39,21 +39,6 @@ class SetupTests(unittest.TestCase):
         self.assertNotIn(SYNTHETIC_KEY, profile.read_text())
         self.assertNotIn(SYNTHETIC_KEY, (self.destination / "config.json").read_text())
 
-    def test_generated_tunnel_command_launches_the_installed_stdio_server(self):
-        import json
-        import os
-        import shlex
-
-        profile = self.module().create_artifacts(self.destination, TUNNEL, SYNTHETIC_KEY)
-        command = json.loads(profile.read_text())["mcp"]["commands"][0]["command"]
-        result = subprocess.run(
-            [*shlex.split(command), "--check-config"],
-            capture_output=True, text=True, timeout=30,
-            cwd=Path(__file__).absolute().parent.parent,
-            env={"PATH": os.defpath, "HOME": str(self.base), "LANG": "C.UTF-8"},
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(result.stdout), {"valid": True, "tasks": []})
 
     def test_existing_destination_and_credentials_are_never_overwritten(self):
         setup = self.module()

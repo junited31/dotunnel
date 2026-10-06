@@ -29,8 +29,8 @@ PLUGINS_URL = "https://chatgpt.com/plugins"
 CLIENT_URL = "https://github.com/openai/tunnel-client/releases/latest"
 
 
-def _trusted_parent(path: Path) -> int:
-    """Return a no-follow fd only for ancestors protected from other UIDs."""
+def _trusted_parent(path: Path, *, root_only: bool = False) -> int:
+    """Return a no-follow fd only for ancestors protected from untrusted writes."""
     fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
     try:
         for component in (None, *path.parts[1:]):
@@ -39,7 +39,11 @@ def _trusted_parent(path: Path) -> int:
                 os.close(fd)
                 fd = child
             info = os.fstat(fd)
-            if info.st_uid not in (0, os.getuid()) or (info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX):
+            if (
+                info.st_uid != 0 and (root_only or info.st_uid != os.getuid())
+            ) or (info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX):
+                if root_only:
+                    raise ValueError("System executable ancestors must be root-owned and protected from other users' writes")
                 raise ValueError("Setup ancestors must be root/operator-owned and protected from other users' writes (shared sticky directories are allowed)")
         return fd
     except BaseException:
@@ -120,7 +124,7 @@ def create_artifacts(directory: Path, tunnel_id: str, key: str) -> Path:
             "log": {"level": "warn", "format": "json"},
             "mcp": {
                 "stdio_send_initialized_notification": True,
-                "commands": [{"channel": "main", "command": shlex.join([sys.executable, "-m", "dotunnel", "serve", "--config", str(config)])}],
+                "commands": [{"channel": "main", "command": shlex.join([sys.executable, "-I", "-m", "dotunnel", "serve", "--config", str(config)])}],
             },
         }
         _write_private(state_fd, "profile.yaml", json.dumps(data, indent=2) + "\n")

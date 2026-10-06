@@ -895,11 +895,11 @@ def _offer_bubblewrap_install(
     install_fn: Callable[[list[str]], bool],
     argv: list[str] | None,
 ) -> str:
-    """Offer an approved sudo install when this account can use sudo; otherwise print guidance."""
+    """Offer a best-effort sudo install attempt; otherwise print guidance."""
     if argv and sudo_fn():
         command = shlex.join(argv)
         while True:
-            answer = _prompt(prompt_fn, f"This account can use sudo. Install Bubblewrap now with `{command}`? [Y/n] ").lower()
+            answer = _prompt(prompt_fn, f"Sudo appears available for this account. Install Bubblewrap now with `{command}`? [Y/n] ").lower()
             if answer in ("", "y", "yes"):
                 if install_fn(argv):
                     status = check()
@@ -995,7 +995,17 @@ def _arguments(argv: list[str] | None) -> tuple[list[str], argparse.Namespace]:
     return values, parser.parse_args(values)
 
 
+def _require_interactive_terminal() -> None:
+    try:
+        interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    except (AttributeError, OSError, ValueError):
+        interactive = False
+    if not interactive:
+        raise ValueError("Setup onboarding requires an interactive terminal")
+
+
 def _configure_new_setup(profile: Path) -> None:
+    _require_interactive_terminal()
     installed = integrations.discover_clis()
     if not configure_directory(profile.parent, installed):
         raise KeyboardInterrupt
@@ -1012,6 +1022,7 @@ def main(argv: list[str] | None = None) -> int:
         directory = Path(os.path.normpath(os.fspath(directory)))
         if sys.platform != "linux" or os.getuid() == 0:
             raise ValueError("Run setup on Linux as a non-root operator")
+        _require_interactive_terminal()
         if os.path.lexists(directory):
             installed = integrations.discover_clis()
             return 0 if configure_directory(directory, installed) else 130

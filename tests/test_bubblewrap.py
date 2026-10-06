@@ -6,6 +6,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from dotunnel import integrations
 
@@ -54,13 +55,13 @@ class InstallArgvTests(unittest.TestCase):
 
     def test_distribution_families_get_their_package_manager(self):
         cases = {
-            'ID=ubuntu\nID_LIKE=debian\n': ["sudo", "apt-get", "install", "-y", "bubblewrap"],
-            'ID=debian\n': ["sudo", "apt-get", "install", "-y", "bubblewrap"],
-            'ID="fedora"\n': ["sudo", "dnf", "install", "-y", "bubblewrap"],
-            'ID="rocky"\nID_LIKE="rhel centos fedora"\n': ["sudo", "dnf", "install", "-y", "bubblewrap"],
-            'ID=arch\n': ["sudo", "pacman", "-S", "--noconfirm", "bubblewrap"],
-            'ID="opensuse-tumbleweed"\nID_LIKE="opensuse suse"\n': ["sudo", "zypper", "--non-interactive", "install", "bubblewrap"],
-            'ID=alpine\n': ["sudo", "apk", "add", "bubblewrap"],
+            'ID=ubuntu\nID_LIKE=debian\n': ["/usr/bin/sudo", "/usr/bin/apt-get", "install", "-y", "bubblewrap"],
+            'ID=debian\n': ["/usr/bin/sudo", "/usr/bin/apt-get", "install", "-y", "bubblewrap"],
+            'ID="fedora"\n': ["/usr/bin/sudo", "/usr/bin/dnf", "install", "-y", "bubblewrap"],
+            'ID="rocky"\nID_LIKE="rhel centos fedora"\n': ["/usr/bin/sudo", "/usr/bin/dnf", "install", "-y", "bubblewrap"],
+            'ID=arch\n': ["/usr/bin/sudo", "/usr/bin/pacman", "-S", "--noconfirm", "bubblewrap"],
+            'ID="opensuse-tumbleweed"\nID_LIKE="opensuse suse"\n': ["/usr/bin/sudo", "/usr/bin/zypper", "--non-interactive", "install", "bubblewrap"],
+            'ID=alpine\n': ["/usr/bin/sudo", "/sbin/apk", "add", "bubblewrap"],
         }
         for text, expected in cases.items():
             with self.subTest(text=text):
@@ -72,33 +73,110 @@ class InstallArgvTests(unittest.TestCase):
 
 
 class SudoAvailableTests(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.base = Path(self.tmp.name)
+    def test_explicitly_missing_sudo_means_no_sudo(self):
+        with patch.object(integrations.subprocess, "run") as run:
+            self.assertFalse(integrations.sudo_available(sudo=None, group_names={"sudo"}))
+        run.assert_not_called()
 
-    def sudo(self, code):
-        path = self.base / "sudo"
-        path.write_text(f"#!/bin/sh\nexit {code}\n", encoding="utf-8")
-        path.chmod(0o700)
-        return str(path)
+    def test_missing_trusted_sudo_does_not_assume_admin_group_means_installable(self):
+        with patch.object(integrations, "_checked_path", side_effect=FileNotFoundError), patch.object(
+            integrations.subprocess, "run"
+        ) as run:
+            self.assertFalse(integrations.sudo_available(group_names={"sudo"}))
+        run.assert_not_called()
 
-    def test_no_sudo_binary_means_no_sudo(self):
-        self.assertFalse(integrations.sudo_available(sudo=None, group_names={"sudo"}))
 
     def test_non_interactive_sudo_success_means_sudo(self):
-        self.assertTrue(integrations.sudo_available(sudo=self.sudo(0), group_names=set()))
+        with patch.object(integrations, "_checked_path"), patch.object(
+            integrations.subprocess, "run", return_value=Mock(returncode=0)
+        ) as run:
+            self.assertTrue(integrations.sudo_available(group_names=set()))
+        self.assertEqual(run.call_args.args[0], ["/usr/bin/sudo", "-n", "-l"])
+        self.assertEqual(run.call_args.kwargs["env"]["PATH"], os.defpath)
 
-    def test_password_sudo_is_recognized_by_admin_group(self):
+    def test_admin_group_membership_allows_a_prompted_install_attempt(self):
         for group in ("sudo", "wheel", "admin"):
             with self.subTest(group=group):
-                self.assertTrue(integrations.sudo_available(sudo=self.sudo(1), group_names={"users", group}))
+                with patch.object(integrations, "_checked_path"), patch.object(
+                    integrations.subprocess, "run", return_value=Mock(returncode=1)
+                ) as run:
+                    self.assertTrue(integrations.sudo_available(group_names={"users", group}))
+                self.assertEqual(run.call_args.args[0], ["/usr/bin/sudo", "-n", "-l"])
+                self.assertEqual(run.call_args.kwargs["env"]["PATH"], os.defpath)
 
     def test_ordinary_account_without_sudo_rights(self):
-        self.assertFalse(integrations.sudo_available(sudo=self.sudo(1), group_names={"users", "docker"}))
+        with patch.object(integrations, "_checked_path"), patch.object(
+            integrations.subprocess, "run", return_value=Mock(returncode=1)
+        ):
+            self.assertFalse(integrations.sudo_available(group_names={"users", "docker"}))
+
+    def test_malicious_path_sudo_is_never_selected_for_preapproval_probe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bindir = Path(directory)
+            marker = bindir / "ran"
+            impostor = bindir / "sudo"
+            impostor.write_text(f"#!/bin/sh\ntouch {marker}\n", encoding="utf-8")
+            impostor.chmod(0o700)
+            with patch.dict(os.environ, {"PATH": str(bindir)}), patch.object(
+                integrations, "_checked_path"
+            ), patch.object(
+                integrations.subprocess, "run", return_value=Mock(returncode=1)
+            ) as run:
+                self.assertFalse(integrations.sudo_available(group_names=set()))
+            self.assertEqual(run.call_args.args[0], ["/usr/bin/sudo", "-n", "-l"])
+            self.assertEqual(run.call_args.kwargs["env"]["PATH"], os.defpath)
+            self.assertFalse(marker.exists())
 
 
-ARGV = ["sudo", "apt-get", "install", "-y", "bubblewrap"]
+class InstallExecutionTests(unittest.TestCase):
+    def test_package_install_uses_fixed_system_argv_and_clean_path(self):
+        argv = ["/usr/bin/sudo", "/usr/bin/apt-get", "install", "-y", "bubblewrap"]
+        with tempfile.TemporaryDirectory() as directory:
+            bindir = Path(directory)
+            marker = bindir / "ran"
+            for name in ("sudo", "apt-get"):
+                impostor = bindir / name
+                impostor.write_text(f"#!/bin/sh\ntouch {marker}\n", encoding="utf-8")
+                impostor.chmod(0o700)
+            with patch.dict(os.environ, {"PATH": str(bindir)}), patch.object(
+                integrations, "_checked_path"
+            ), patch.object(
+                integrations.subprocess, "run", return_value=Mock(returncode=0)
+            ) as run, contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(integrations.install_bubblewrap(argv))
+            self.assertEqual(run.call_args.args[0], argv)
+            self.assertEqual(run.call_args.kwargs["env"]["PATH"], os.defpath)
+            self.assertFalse(marker.exists())
+
+    def test_package_install_refuses_untrusted_system_executable_metadata(self):
+        with patch.object(
+            integrations, "_checked_path", side_effect=ValueError
+        ) as checked, patch.object(integrations.subprocess, "run") as run, contextlib.redirect_stdout(
+            io.StringIO()
+        ):
+            self.assertFalse(integrations.install_bubblewrap(ARGV))
+        checked.assert_called_once_with(
+            Path("/usr/bin/sudo"), "executable", root_only=True
+        )
+        run.assert_not_called()
+
+    def test_untrusted_or_rewritten_package_command_is_never_spawned(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bindir = Path(directory)
+            marker = bindir / "ran"
+            impostor = bindir / "apt-get"
+            impostor.write_text(f"#!/bin/sh\ntouch {marker}\n", encoding="utf-8")
+            impostor.chmod(0o700)
+            argv = ["/usr/bin/sudo", str(impostor), "install", "-y", "bubblewrap"]
+            with patch.dict(os.environ, {"PATH": str(bindir)}), patch.object(
+                integrations.subprocess, "run"
+            ) as run, contextlib.redirect_stdout(io.StringIO()):
+                self.assertFalse(integrations.install_bubblewrap(argv))
+            run.assert_not_called()
+            self.assertFalse(marker.exists())
+
+
+ARGV = ["/usr/bin/sudo", "/usr/bin/apt-get", "install", "-y", "bubblewrap"]
 
 
 class SetupGatingTests(unittest.TestCase):
@@ -150,7 +228,6 @@ class SetupGatingTests(unittest.TestCase):
         self.assertEqual(installs, [])
         self.assertEqual(selections, [])
         self.assertEqual(self.config.read_bytes(), before)
-        self.assertIn("sudo apt-get install -y bubblewrap", output)
 
     def test_invalid_answer_is_asked_again(self):
         _result, _selections, installs, _output = self.configure(["missing", "ready"], ["maybe", "y"], sudo=True)
@@ -160,7 +237,6 @@ class SetupGatingTests(unittest.TestCase):
         _result, selections, installs, output = self.configure(["missing"], ["s"], sudo=False)
         self.assertEqual(installs, [])
         self.assertEqual(selections, [])
-        self.assertIn("sudo apt-get install -y bubblewrap", output)
 
     def test_failed_install_keeps_setup_and_waits_for_manual_install(self):
         # A failed install is not re-probed; the next check is the operator's Enter in the wait loop.

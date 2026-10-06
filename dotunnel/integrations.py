@@ -45,10 +45,10 @@ def is_managed_task(task: dict[str, Any], backend: str, job_config: Path) -> boo
     )
 
 
-def _trusted_parent(path: Path) -> int:
+def _trusted_parent(path: Path, *, root_only: bool = False) -> int:
     from .setup import _trusted_parent as setup_trusted_parent
 
-    return setup_trusted_parent(path)
+    return setup_trusted_parent(path, root_only=root_only)
 
 
 def _inspect_launcher(candidate: str) -> Path | None:
@@ -103,12 +103,14 @@ def discover_clis() -> dict[str, Path]:
     return found
 
 
-def _checked_path(path: Path, kind: str, *, private: bool = False) -> os.stat_result:
+def _checked_path(
+    path: Path, kind: str, *, private: bool = False, root_only: bool = False,
+) -> os.stat_result:
     if not isinstance(path, Path) or not path.is_absolute() or ".." in path.parts:
         raise ValueError("Native runtime path is invalid")
     flags = _DIRECTORY_FLAGS if kind == "directory" else _FILE_FLAGS
     try:
-        parent_fd = _trusted_parent(path.parent)
+        parent_fd = _trusted_parent(path.parent, root_only=root_only)
         try:
             fd = os.open(path.name, flags, dir_fd=parent_fd)
         finally:
@@ -119,7 +121,12 @@ def _checked_path(path: Path, kind: str, *, private: bool = False) -> os.stat_re
         info = os.fstat(fd)
     finally:
         os.close(fd)
-    if info.st_uid not in (0, os.getuid()) or info.st_mode & 0o022:
+    if root_only:
+        if info.st_uid != 0:
+            raise ValueError("System executable must be root-owned")
+    elif info.st_uid not in (0, os.getuid()):
+        raise ValueError("Native runtime path metadata is unsafe")
+    if info.st_mode & 0o022:
         raise ValueError("Native runtime path metadata is unsafe")
     if kind == "directory":
         if not stat.S_ISDIR(info.st_mode):
@@ -278,12 +285,21 @@ def bubblewrap_status(path: Path = BWRAP_PATH) -> str:
 
 
 _INSTALL_ARGV = (
-    ({"debian", "ubuntu"}, ("sudo", "apt-get", "install", "-y", "bubblewrap")),
-    ({"fedora", "rhel", "centos"}, ("sudo", "dnf", "install", "-y", "bubblewrap")),
-    ({"arch"}, ("sudo", "pacman", "-S", "--noconfirm", "bubblewrap")),
-    ({"opensuse", "suse", "sles"}, ("sudo", "zypper", "--non-interactive", "install", "bubblewrap")),
-    ({"alpine"}, ("sudo", "apk", "add", "bubblewrap")),
+    ({"debian", "ubuntu"}, ("/usr/bin/sudo", "/usr/bin/apt-get", "install", "-y", "bubblewrap")),
+    ({"fedora", "rhel", "centos"}, ("/usr/bin/sudo", "/usr/bin/dnf", "install", "-y", "bubblewrap")),
+    ({"arch"}, ("/usr/bin/sudo", "/usr/bin/pacman", "-S", "--noconfirm", "bubblewrap")),
+    ({"opensuse", "suse", "sles"}, ("/usr/bin/sudo", "/usr/bin/zypper", "--non-interactive", "install", "bubblewrap")),
+    ({"alpine"}, ("/usr/bin/sudo", "/sbin/apk", "add", "bubblewrap")),
 )
+_SYSTEM_EXECUTABLES = {
+    "sudo": (Path("/usr/bin/sudo"),),
+    "apt-get": (Path("/usr/bin/apt-get"),),
+    "dnf": (Path("/usr/bin/dnf"),),
+    "pacman": (Path("/usr/bin/pacman"),),
+    "zypper": (Path("/usr/bin/zypper"),),
+    "apk": (Path("/sbin/apk"),),
+}
+_INSTALL_ENVIRONMENT = {"PATH": os.defpath, "LANG": "C.UTF-8"}
 _ADMIN_GROUPS = frozenset({"sudo", "wheel", "admin"})
 
 
@@ -317,20 +333,47 @@ def _group_names() -> set[str]:
     return names
 
 
+def _trusted_system_executable(command: str, path: Path | None = None) -> Path | None:
+    """Accept only root-owned fixed system executables with protected ancestors."""
+    candidates = _SYSTEM_EXECUTABLES.get(command)
+    if candidates is None:
+        return None
+    if path is not None:
+        if path not in candidates:
+            return None
+        candidates = (path,)
+    for candidate in candidates:
+        try:
+            _checked_path(candidate, "executable", root_only=True)
+        except (OSError, TypeError, ValueError):
+            continue
+        return candidate
+    return None
+
+
 def sudo_available(*, sudo: str | None | object = ..., group_names: set[str] | None = None) -> bool:
     """Best-effort check that this account may use sudo, without asking for a password.
 
-    Passwordless sudo is detected with `sudo -n true`; password sudo is inferred from
-    membership in a conventional administrator group. A wrong guess only means the
-    install attempt fails and setup falls back to printed guidance.
+    A successful non-interactive permission listing (`sudo -n -l`) or membership
+    in a conventional administrator group is only a best-effort signal. It does
+    not guarantee installation permission; failure falls back to printed guidance.
     """
-    path = shutil.which("sudo") if sudo is ... else sudo
-    if not path:
+    if sudo is ...:
+        path = _trusted_system_executable("sudo")
+    elif sudo is None:
+        path = None
+    else:
+        try:
+            path = _trusted_system_executable("sudo", Path(str(sudo)))
+        except (TypeError, ValueError):
+            path = None
+    if path is None:
         return False
     try:
         result = subprocess.run(
-            [str(path), "-n", "true"],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
+            [str(path), "-n", "-l"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env=dict(_INSTALL_ENVIRONMENT), timeout=10,
         )
         if result.returncode == 0:
             return True
@@ -341,10 +384,21 @@ def sudo_available(*, sudo: str | None | object = ..., group_names: set[str] | N
 
 
 def install_bubblewrap(argv: list[str]) -> bool:
-    """Run the approved install command on this terminal so sudo can ask for a password."""
+    """Run only a fixed, trusted distribution install command on the user's terminal."""
+    if not isinstance(argv, list) or not all(isinstance(arg, str) for arg in argv):
+        return False
+    allowed = {command for _families, command in _INSTALL_ARGV}
+    if tuple(argv) not in allowed:
+        return False
+    sudo = _trusted_system_executable("sudo", Path(argv[0]))
+    package_manager = _trusted_system_executable(Path(argv[1]).name, Path(argv[1]))
+    if sudo is None or package_manager is None:
+        return False
     print(f"Running: {shlex.join(argv)}", flush=True)
     try:
-        return subprocess.run(argv, timeout=900).returncode == 0
+        return subprocess.run(
+            argv, env=dict(_INSTALL_ENVIRONMENT), timeout=900,
+        ).returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
 
