@@ -55,6 +55,10 @@ jobs:
         run: python -m pip install --disable-pip-version-check . build
       - name: Run regression suite
         run: python -m unittest discover -s tests -v
+      - name: Install optional adapter runner
+        run: python -m pip install --disable-pip-version-check ./adapter_runner
+      - name: Run optional adapter contract suite
+        run: python -m unittest discover -s adapter_runner/tests -t adapter_runner -v
       - name: Build wheel
         run: python -m build --wheel
       - name: Exercise installed wheel outside source checkout
@@ -70,3 +74,76 @@ jobs:
           cd "$smoke"
           "$RUNNER_TEMP/wheel-smoke/bin/dotunnel" help
           "$RUNNER_TEMP/wheel-smoke/bin/dotunnel" serve --config "$smoke/config.json" --check-config
+      - name: Build optional adapter wheel
+        run: python -m build --wheel adapter_runner --outdir "$RUNNER_TEMP/adapter-dist"
+      - name: Exercise installed optional wheel outside source checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/wheel-smoke/bin/python" -m pip install --disable-pip-version-check "$RUNNER_TEMP/adapter-dist"/*.whl
+          smoke=$(mktemp -d "$RUNNER_TEMP/adapter-smoke.XXXXXX")
+          export ADAPTER_FIXTURE="$GITHUB_WORKSPACE/adapter_runner/tests/backend_fixture.py"
+          export ADAPTER_SMOKE="$smoke"
+          cd "$smoke"
+          "$RUNNER_TEMP/wheel-smoke/bin/python" - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import shutil
+          import subprocess
+          import sys
+          import dotunnel_adapter
+
+          base = Path(os.environ["ADAPTER_SMOKE"])
+          private = base / "private"
+          workspace = base / "workspace"
+          state = private / "state"
+          for path in (private, workspace, state):
+              path.mkdir(mode=0o700)
+          backend = private / "backend.py"
+          shutil.copyfile(os.environ["ADAPTER_FIXTURE"], backend)
+          backend.chmod(0o400)
+          backend_state = private / "backend-state.json"
+          backend_state.write_text(json.dumps({"effects": 0, "mode": "zero_exit_only"}))
+          backend_state.chmod(0o600)
+          executable = Path("/usr/bin/python3").resolve(strict=True)
+          config = private / "config.json"
+          config.write_text(json.dumps({
+              "protocol": "dotunnel.adapter.config/1",
+              "workspace": str(workspace), "request": "pending.json",
+              "reports": "reports", "state_dir": str(state),
+              "project": {"id": "demo", "generation": "project-1", "protected": False,
+                          "write_enabled": False, "operations": ["read_output"]},
+              "backend": {"id": "fixture-backend", "generation": "backend-1",
+                          "version": "1.0.0",
+                          "digest": "sha256:" + hashlib.sha256(executable.read_bytes()).hexdigest(),
+                          "argv": [str(executable), str(backend), str(backend_state)],
+                          "timeout_seconds": 10},
+          }))
+          config.chmod(0o600)
+          runner = str(Path(sys.executable).parent / "dotunnel-adapter-runner")
+          def command(action):
+              return subprocess.run([runner, action, "--config", str(config)],
+                                    check=True, capture_output=True, text=True, timeout=30)
+          owner = json.loads(command("initialize").stdout)["owner"]
+          pending = workspace / "pending.json"
+          pending.write_text(json.dumps({
+              "protocol": "dotunnel.adapter/1", "request_id": "wheel-read",
+              "action": "read_output", "owner": owner,
+              "project": {"id": "demo", "generation": "project-1"},
+              "backend": {"id": "fixture-backend", "generation": "backend-1"},
+              "target": {"kind": "agent", "id": "agent-1", "incarnation": "generation-1"},
+          }))
+          pending.chmod(0o600)
+          summary = json.loads(command("run").stdout)
+          raw = (workspace / summary["report"]).read_bytes()
+          assert hashlib.sha256(raw).hexdigest() == summary["sha256"]
+          report = json.loads(raw)
+          assert report["request_id"] == "wheel-read"
+          assert report["status"]["job_state"] == "outcome_unknown"
+          assert json.loads(backend_state.read_text())["effects"] == 0
+          assert not pending.exists()
+          assert not Path(dotunnel_adapter.__file__).resolve().is_relative_to(Path(os.environ["GITHUB_WORKSPACE"]))
+          print("INSTALLED_ADAPTER_WHEEL_SMOKE=True")
+          PY

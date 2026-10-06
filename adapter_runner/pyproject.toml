@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dotunnel-adapter-runner"
+version = "0.1.0"
+description = "Operator-configured fixed-task runner for bounded JSON session adapters"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+license = "MIT"
+license-files = ["LICENSE"]
+classifiers = ["Operating System :: POSIX :: Linux", "Programming Language :: Python :: 3"]
+
+[project.scripts]
+dotunnel-adapter-runner = "dotunnel_adapter.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["dotunnel_adapter*"]

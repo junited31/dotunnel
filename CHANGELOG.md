@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add the separately installed `dotunnel-adapter-runner` common JSON-stdio runner with fixed private registry profiles, strict typed requests/reports, local per-operation consent, durable ownership/replay, and protected-project refusal. It uses the existing seven MCP tools and is not enabled by base setup.
+- Publish reports atomically without replacement, reserve the complete bounded history frame, and preserve unknown outcomes after admitted effects/signals/state failures. Synthetic tests and installed CLI/PTy/MCP smoke cover consent, one-effect replay, stale/revoked/protected refusal and ambiguous recovery; no real Herdr/Orca/tmux/provider adapter is shipped or invoked.
+- Check the optional runner suite and installed wheel in existing Python CI jobs; leave core 0.1.4, release wheels and installer pin unchanged.
 - Prepare stable-tag GitHub Release drafts through exact-source/main-CI validation, read-only wheel preparation and a separate narrowly privileged asset attachment job; publication remains manual.
 - Provide read-only manual release dry-runs, checksum/source manifests and release-specific fixed-pin installers without rewriting the main installer pin or existing Release assets.
 - Document the protected-main publication flow and the distinction between preparation verification and live draft/publication verification.

@@ -13,6 +13,7 @@ service or public MCP endpoint.
 |---|---|
 | Core | Tunnel setup/diagnosis helpers, bounded workspace file tools and fixed tasks |
 | Optional | Isolated jobs for separately installed Codex, Claude Code or OMP CLIs |
+| Optional runner | Separately installed [common JSON-stdio adapter runner](adapter_runner/README.md); no Herdr/Orca/tmux adapters shipped |
 
 ## Requirements
 
@@ -62,6 +63,12 @@ isolation, private installation and connecting the Tunnel to ChatGPT.
 | `dotunnel setup` | Create a Tunnel setup or configure optional CLI integrations |
 | `dotunnel doctor` | Read-only configuration, client and connection diagnosis |
 | `dotunnel update` | Check and interactively install a newer stable release |
+
+## Optional common adapter runner
+
+The [standalone runner](adapter_runner/README.md) uses the existing seven file/task MCP tools. Install it separately from reviewed source and explicitly register one fixed task; base installation and setup do not enable it. Mutations require local interactive consent bound to the exact request and private registry profile. Durable replay returns the recorded outcome without redispatch; ambiguous effects remain `outcome_unknown`.
+
+No live Herdr, Orca, tmux or provider adapter is included or verified. This source-only addition does not change the released core wheel or installer pin.
 
 ## Safety
 
