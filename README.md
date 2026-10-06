@@ -24,10 +24,7 @@ service or public MCP endpoint.
 
 ## Install
 
-This repository is currently private, so the anonymous install URL will not
-work until an explicit public conversion. For now, use the
-[authenticated private wheel instructions](docs/guide.md#private-repository-installation).
-After public access is enabled:
+Install the current release without a GitHub account:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/junited31/dotunnel/main/install.sh | sh
@@ -40,6 +37,8 @@ official client, or change accounts, permissions, keys, Tunnel settings, shell
 startup or services. It refuses to overwrite an existing install or unrelated
 launcher; use `dotunnel update` for an existing installation. If `dotunnel` is
 not on `PATH`, add `$HOME/.local/bin` yourself or invoke it by absolute path.
+
+Prefer downloading the wheel yourself? See [manual installation](docs/guide.md#manual-installation).
 
 ## Configure
 

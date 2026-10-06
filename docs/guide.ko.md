@@ -12,13 +12,13 @@ root가 아닌 Linux 계정, Python 3.11 이상, `venv`와 `pip`가 포함된 `p
 
 ### 공개 설치 스크립트
 
-저장소는 현재 private입니다. 명시적인 공개 전환 전에는 익명 raw GitHub URL을 사용할 수 없습니다. private 저장소 다운로드 방법으로 사용하지 마세요. 공개된 뒤 front page의 한 줄 명령을 실행하면 현재 사용자 권한으로 저장소 `main`의 `install.sh`가 실행됩니다. `curl | sh`는 해당 스크립트를 실행하므로 스크립트 자체를 읽고 신뢰해야 합니다. 설치 도구는 고정 wheel을 검증하지만 wheel checksum이 shell 스크립트까지 인증하는 것은 아닙니다. 설치 스크립트는 패키지만 설치하며 piped stdin에서 대화형 setup을 실행하지 않습니다.
+front page의 한 줄 명령은 GitHub 로그인 없이 공개 저장소 `main`의 `install.sh`를 내려받아 현재 사용자 권한으로 실행합니다. `curl | sh`는 해당 스크립트를 실행하므로 스크립트 자체를 읽고 신뢰해야 합니다. 설치 도구는 고정 wheel을 검증하지만 wheel checksum이 shell 스크립트까지 인증하는 것은 아닙니다. 설치 스크립트는 패키지만 설치하며 piped stdin에서 대화형 setup을 실행하지 않습니다.
 
 공개 설치는 `$HOME/.local/share/dotunnel/venv`를 사용하고 `$HOME/.local/bin/dotunnel`을 제공합니다. 기존 설치 경로나 무관한 launcher를 덮어쓰지 않습니다. sudo 사용, 계정·권한 변경, shell startup 수정, 서비스 실행, 공식 Tunnel client 설치, key 생성이나 Tunnel 설정 변경을 하지 않습니다. launcher를 찾지 못하면 `$HOME/.local/bin`을 직접 `PATH`에 추가하거나 절대 경로로 실행하세요. shell startup 파일은 자동 수정하지 않습니다.
 
-### Private repository installation
+### 수동 설치
 
-현재 private 저장소에서는 인증된 GitHub CLI(`gh`)로 v0.1.3 release wheel을 다운로드합니다. 이 수동 방법은 wheel을 직접 내려받으며 익명 설치 스크립트를 사용할 수 있다고 주장하지 않습니다. 설치 **전에** 기대하는 byte 수와 SHA-256을 모두 확인하세요.
+내려받은 shell 스크립트를 실행하고 싶지 않다면 v0.1.3 release wheel을 직접 다운로드하세요. GitHub 로그인과 `gh`는 필요하지 않습니다. 설치 **전에** 기대하는 byte 수와 SHA-256을 모두 확인하세요.
 
 ```sh
 set -eu
@@ -30,11 +30,9 @@ if [ -e "$install" ] || [ -L "$install" ]; then
 fi
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-gh release download v0.1.3 \
-  --repo junited31/dotunnel \
-  --pattern 'dotunnel-0.1.3-py3-none-any.whl' \
-  --dir "$tmp"
 wheel="$tmp/dotunnel-0.1.3-py3-none-any.whl"
+curl --fail --location --output "$wheel" \
+  https://github.com/junited31/dotunnel/releases/download/v0.1.3/dotunnel-0.1.3-py3-none-any.whl
 test "$(wc -c < "$wheel")" -eq 90633
 printf '%s  %s\n' \
   fbb6fd8d2ebea7368fe86e5096fe40c1830d829065c81ca3e7ed49e552eb9912 \
@@ -44,7 +42,7 @@ python3 -I -m venv "$install"
 "$install/bin/dotunnel" help
 ```
 
-`gh release download`에는 `junited31/dotunnel` 저장소에 대한 인증된 접근이 필요합니다. byte 수나 checksum이 다르면 중단하세요. 이 수동 설치는 `$HOME/.local/share/dotunnel/venv/bin/dotunnel`을 직접 실행하며 공개 설치 스크립트의 `$HOME/.local/bin/dotunnel` launcher는 만들지 않습니다. 기존 설치 경로를 교체하지 마세요. 기존 설치에서는 `dotunnel update`를 사용하세요.
+byte 수나 checksum이 다르면 중단하세요. 이 수동 설치는 `$HOME/.local/share/dotunnel/venv/bin/dotunnel`을 직접 실행하며 한 줄 설치 스크립트의 `$HOME/.local/bin/dotunnel` launcher는 만들지 않습니다. 기존 설치 경로를 교체하지 마세요. 기존 설치에서는 `dotunnel update`를 사용하세요.
 
 이 수동 설치의 setup 명령은 venv의 절대 경로를 사용합니다.
 
@@ -81,7 +79,7 @@ v0.1.0–v0.1.2에서 만든 profile은 패키지 업데이트가 수정하지 �
 ## 4. 진단, 업데이트와 연결 해제
 
 - **`dotunnel doctor`**는 읽기 전용입니다. client나 모델을 실행하거나 설정을 변경하지 않습니다. setup/config, 선택 client, 선택 Bubblewrap 상태를 검사합니다. 유효한 config나 인증 파일 metadata만으로 provider 인증 성공을 입증할 수 없습니다. live/ready와 성공한 control-plane poll을 관찰하지 못하면 exit 2입니다. `--directory DIR`, 필요하면 `--tunnel-client /절대/경로`로 경로를 지정하세요.
-- **`dotunnel update`**는 최신 안정 GitHub release를 확인하고 설치 전에 묻습니다. non-root Linux의 non-editable venv 설치만 지원하며 더 높은 설치 버전으로 downgrade하지 않습니다. 설치 전에 release wheel 이름·크기·GitHub SHA-256과 package name/version을 확인한 뒤 binary-only 설치를 합니다. 현재 private 저장소 업데이트에는 `gh`를 설치하고 인증해야 합니다. 조회 실패, release 부재, EOF 또는 비대화형 입력은 설치하지 않고 exit 2이며 Ctrl-C는 exit 130입니다. 부분 설치 rollback은 보장되지 않습니다. config, credential, Tunnel 설정을 바꾸거나 실행 중인 프로세스를 재시작하지 않습니다. 작업이 끝난 뒤 MCP/client를 직접 재시작하세요. 공개 한 줄 명령으로 새로 설치할 때는 `gh`가 필요하지 않습니다.
+- **`dotunnel update`**는 최신 안정 GitHub release를 확인하고 설치 전에 묻습니다. non-root Linux의 non-editable venv 설치만 지원하며 더 높은 설치 버전으로 downgrade하지 않습니다. 설치 전에 release wheel 이름·크기·GitHub SHA-256과 package name/version을 확인한 뒤 binary-only 설치를 합니다. 업데이트는 GitHub CLI(`gh`)를 사용하므로 설치 후 `gh auth login`으로 인증하세요. 조회 실패, release 부재, EOF 또는 비대화형 입력은 설치하지 않고 exit 2이며 Ctrl-C는 exit 130입니다. 부분 설치 rollback은 보장되지 않습니다. config, credential, Tunnel 설정을 바꾸거나 실행 중인 프로세스를 재시작하지 않습니다. 작업이 끝난 뒤 MCP/client를 직접 재시작하세요. 새 설치에는 `gh`가 필요하지 않습니다.
 - **연결 해제:** foreground client에 Ctrl-C를 보내면 해당 client는 멈추지만 접근 권한까지 취소하지는 않습니다. 완전한 해제에는 ChatGPT 앱 연결 해제/삭제, Tunnel association 제거, runtime key 폐기가 필요할 수 있습니다. ChatGPT에 이미 전송된 데이터는 회수되지 않습니다. 프로젝트는 지속 서비스 생성을 하지 않습니다. 직접 구성한 서비스가 있다면 서버 정책에 따라 관리하세요.
 
 ## 5. Workspace, 작업과 MCP 도구

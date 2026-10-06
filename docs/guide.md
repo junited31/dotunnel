@@ -12,13 +12,13 @@ Use a non-root Linux account with Python 3.11 or later, `python3` with `venv` an
 
 ### Public installer
 
-The repository is private now. The anonymous raw GitHub URL is unavailable until an explicit public conversion; do not use it as a private-repository download method. After public access is enabled, the front-page one-line command runs `install.sh` from the repository's `main` branch as your current user. `curl | sh` executes that script; read and trust the script itself. The installer verifies the pinned wheel before pip installs it, but that wheel checksum does not authenticate the shell script. The installer only installs the package: it does not run interactive setup from piped stdin.
+The front-page one-line command downloads `install.sh` from the public repository's `main` branch without GitHub authentication and runs it as your current user. `curl | sh` executes that script; read and trust the script itself. The installer verifies the pinned wheel before pip installs it, but that wheel checksum does not authenticate the shell script. The installer only installs the package: it does not run interactive setup from piped stdin.
 
 The public installer uses `$HOME/.local/share/dotunnel/venv` and exposes `$HOME/.local/bin/dotunnel`. It refuses to overwrite an existing install path or unrelated launcher. It does not use sudo, change accounts or permissions, edit shell startup files, start services, install the official Tunnel client, create keys or modify Tunnel settings. If the launcher is not found, add `$HOME/.local/bin` to `PATH` yourself or invoke it by absolute path; no shell startup file is edited.
 
-### Private repository installation
+### Manual installation
 
-For the current private repository, download the v0.1.3 release wheel with an authenticated GitHub CLI (`gh`). This manual route downloads the wheel directly; it does not claim that the anonymous installer script is accessible. Check both the expected byte count and SHA-256 **before** installing:
+To avoid executing a downloaded shell script, download the v0.1.3 release wheel directly. GitHub authentication and `gh` are not required. Check both the expected byte count and SHA-256 **before** installing:
 
 ```sh
 set -eu
@@ -30,11 +30,9 @@ if [ -e "$install" ] || [ -L "$install" ]; then
 fi
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-gh release download v0.1.3 \
-  --repo junited31/dotunnel \
-  --pattern 'dotunnel-0.1.3-py3-none-any.whl' \
-  --dir "$tmp"
 wheel="$tmp/dotunnel-0.1.3-py3-none-any.whl"
+curl --fail --location --output "$wheel" \
+  https://github.com/junited31/dotunnel/releases/download/v0.1.3/dotunnel-0.1.3-py3-none-any.whl
 test "$(wc -c < "$wheel")" -eq 90633
 printf '%s  %s\n' \
   fbb6fd8d2ebea7368fe86e5096fe40c1830d829065c81ca3e7ed49e552eb9912 \
@@ -44,9 +42,9 @@ python3 -I -m venv "$install"
 "$install/bin/dotunnel" help
 ```
 
-`gh release download` requires access to `junited31/dotunnel` as an authenticated user. Stop if the size or checksum check fails. This manual route invokes `$HOME/.local/share/dotunnel/venv/bin/dotunnel` directly; it does not create the public installer's `$HOME/.local/bin/dotunnel` launcher. Do not replace an existing install path; use `dotunnel update` from that installation.
+Stop if the size or checksum check fails. This manual route invokes `$HOME/.local/share/dotunnel/venv/bin/dotunnel` directly; it does not create the one-line installer's `$HOME/.local/bin/dotunnel` launcher. Do not replace an existing install path; use `dotunnel update` from that installation.
 
-For this private wheel route, start setup with the venv's absolute launcher:
+For this manual wheel route, start setup with the venv's absolute launcher:
 
 ```sh
 "$HOME/.local/share/dotunnel/venv/bin/dotunnel" setup --directory "$HOME/.dotunnel-setup"
@@ -81,7 +79,7 @@ Package updates do not rewrite profiles made by v0.1.0–v0.1.2. Before starting
 ## 4. Diagnose, update and disconnect
 
 - **`dotunnel doctor`** is read-only: it starts no client or model and changes no settings. It checks setup/configuration, the selected client and optional Bubblewrap status. Valid config or auth-file metadata alone is not proof of provider authentication. Unless live/ready and a successful control-plane poll are observed, doctor exits 2. Use `--directory DIR` and, if needed, `--tunnel-client /absolute/path` to select paths.
-- **`dotunnel update`** checks the latest stable GitHub release and asks before installing. It is limited to non-root Linux, non-editable venv installations; it does not downgrade a newer version. The release wheel name, size, GitHub-reported SHA-256 and package name/version are checked before binary-only installation. For the current private repository, `gh` must be installed and authenticated; lookup failure, a missing release, EOF or non-interactive input fails closed (exit 2); Ctrl-C exits 130. A partial-install rollback is not guaranteed. Update changes no config, credentials or Tunnel settings and restarts no running process; restart idle MCP/client processes yourself. `gh` is not required for a fresh install from the public one-line installer.
+- **`dotunnel update`** checks the latest stable GitHub release and asks before installing. It is limited to non-root Linux, non-editable venv installations; it does not downgrade a newer version. The release wheel name, size, GitHub-reported SHA-256 and package name/version are checked before binary-only installation. Update uses GitHub CLI (`gh`); install it and authenticate with `gh auth login`. Lookup failure, a missing release, EOF or non-interactive input fails closed (exit 2); Ctrl-C exits 130. A partial-install rollback is not guaranteed. Update changes no config, credentials or Tunnel settings and restarts no running process; restart idle MCP/client processes yourself. `gh` is not required for a fresh install.
 - **Disconnecting** a foreground client with Ctrl-C stops that client but does not revoke access. Depending on your setup, fully removing access may require disconnecting/deleting the ChatGPT app, removing the Tunnel association and revoking the runtime key. Data already sent to ChatGPT is not recalled. The project creates no persistent service; manage any service you set up according to your own server policy.
 
 ## 5. Workspace, tasks and MCP tools

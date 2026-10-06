@@ -24,9 +24,7 @@ private Secure MCP Tunnel 연결 도우미입니다. 지정한 workspace의 파�
 
 ## 설치
 
-이 저장소는 현재 private이므로 명시적으로 공개 전환되기 전에는 익명 설치 URL을
-사용할 수 없습니다. 지금은 [인증된 private wheel 설치 안내](docs/guide.ko.md#private-repository-installation)를
-따르세요. 공개 전환 후에는:
+GitHub 로그인 없이 현재 릴리스를 설치합니다.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/junited31/dotunnel/main/install.sh | sh
@@ -39,6 +37,8 @@ curl -fsSL https://raw.githubusercontent.com/junited31/dotunnel/main/install.sh 
 변경도 하지 않습니다. 기존 설치 경로나 무관한 launcher를 덮어쓰지 않습니다.
 기존 설치에는 `dotunnel update`를 사용하세요. `dotunnel`을 찾지 못하면
 `$HOME/.local/bin`을 직접 `PATH`에 추가하거나 절대 경로로 실행하세요.
+
+wheel을 직접 내려받으려면 [수동 설치 안내](docs/guide.ko.md#수동-설치)를 참고하세요.
 
 ## 설정
 
