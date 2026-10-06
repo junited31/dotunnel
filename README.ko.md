@@ -13,6 +13,7 @@ private Secure MCP Tunnel 연결 도우미입니다. 지정한 workspace의 파�
 |---|---|
 | 기본 | Tunnel 설정·진단 도우미, 제한된 workspace 파일 도구와 고정 작업 |
 | 선택 | 별도 설치한 Codex·Claude Code·OMP CLI용 격리 작업 |
+| 선택 runner | 별도 설치하는 [공통 JSON-stdio adapter runner](adapter_runner/README.md); Herdr·Orca·tmux adapter는 포함하지 않음 |
 
 ## 요구사항
 
@@ -62,6 +63,12 @@ workspace는 `tasks: []`로 시작합니다. 계정 격리, private 설치와 Ch
 | `dotunnel setup` | Tunnel 설정 생성 또는 선택 CLI 연동 설정 |
 | `dotunnel doctor` | 설정·client·연결 상태 읽기 전용 진단 |
 | `dotunnel update` | 최신 안정 release 확인 후 대화형 업데이트 |
+
+## 선택 공통 adapter runner
+
+[독립 runner](adapter_runner/README.md)는 기존 일곱 file/task MCP 도구를 사용합니다. 검토한 source에서 별도 설치하고 고정 작업 하나를 명시적으로 등록해야 하며, 기본 설치·setup은 이를 활성화하지 않습니다. mutation은 정확한 요청과 private registry profile에 묶인 로컬 대화형 승인이 필요합니다. durable replay는 재실행 없이 저장한 결과를 반환하며, 불명확한 효과는 `outcome_unknown`으로 유지합니다.
+
+실제 Herdr·Orca·tmux·provider adapter는 포함하거나 검증하지 않았습니다. 이번 source 추가로 기존 core release wheel이나 installer pin은 변경하지 않습니다.
 
 ## 안전
 
