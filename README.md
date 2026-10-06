@@ -1,6 +1,6 @@
 # dotunnel
 
-<p align="center"><img src="assets/dotunnel.png" alt="dotunnel: a hollow cylinder forming a tunnel" width="240"></p>
+<p align="center"><img src="assets/dotunnel.png" alt="dotunnel: a hollow cylinder forming a tunnel" width="840"></p>
 
 **English** | [한국어](README.ko.md)
 

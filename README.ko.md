@@ -1,6 +1,6 @@
 # dotunnel
 
-<p align="center"><img src="assets/dotunnel.png" alt="dotunnel: 속이 뚫린 원기둥으로 형상화한 터널" width="240"></p>
+<p align="center"><img src="assets/dotunnel.png" alt="dotunnel: 속이 뚫린 원기둥으로 형상화한 터널" width="840"></p>
 
 [English](README.md) | **한국어**
 
