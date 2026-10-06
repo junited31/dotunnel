@@ -1,21 +1,22 @@
 #!/bin/sh
 set -eu
 
+WHEEL_VERSION='0.1.4'
 WHEEL_URL='https://github.com/junited31/dotunnel/releases/download/v0.1.4/dotunnel-0.1.4-py3-none-any.whl'
 WHEEL_SHA256='6ed19be1672ac3961f0e8230abd43af47c08eee4720ad2898b21d3ee6fc1af0f'
 WHEEL_BYTES=80847
 
 usage() {
-    cat <<'EOF'
+    cat <<EOF
 Usage: install.sh [--help]
 
-Install the verified dotunnel 0.1.4 wheel into a dedicated Python virtualenv at
-$HOME/.local/share/dotunnel/venv and expose it as $HOME/.local/bin/dotunnel.
+Install the verified dotunnel $WHEEL_VERSION wheel into a dedicated Python virtualenv at
+\$HOME/.local/share/dotunnel/venv and expose it as \$HOME/.local/bin/dotunnel.
 
 Requirements: Linux, a non-root user, Python 3.11 or newer with venv/ensurepip,
 curl, and sha256sum. The installer does not install the separate official
 tunnel-client or run setup. After installation, run:
-  dotunnel setup --directory "$HOME/.dotunnel-setup"
+  dotunnel setup --directory "\$HOME/.dotunnel-setup"
 EOF
 }
 
@@ -156,7 +157,7 @@ fi
 
 umask 077
 TEMP_DIR=$(mktemp -d /tmp/dotunnel-install.XXXXXXXX) || fail 'Unable to create a private temporary directory under /tmp.'
-WHEEL_FILE="$TEMP_DIR/dotunnel-0.1.4-py3-none-any.whl"
+WHEEL_FILE="$TEMP_DIR/dotunnel-${WHEEL_VERSION}-py3-none-any.whl"
 if ! curl --disable --fail --location --silent --show-error --connect-timeout 15 --max-time 120 --max-filesize "$WHEEL_BYTES" --output "$WHEEL_FILE" "$WHEEL_URL"; then
     fail 'Unable to download the pinned dotunnel wheel.'
 fi
@@ -200,8 +201,8 @@ ENV_CREATED=1
 "$VENV_PATH/bin/python" -I -m pip --isolated install --no-input --disable-pip-version-check \
     --prefix "$VENV_PATH" --no-cache-dir --only-binary=:all: "$WHEEL_FILE" || \
     fail 'Binary-only installation failed; the newly created environment was removed.'
-"$VENV_PATH/bin/python" -I -c 'import importlib.metadata as m; raise SystemExit(0 if m.version("dotunnel") == "0.1.4" else 1)' \
-    >/dev/null 2>&1 || fail 'The requested dotunnel 0.1.4 package was not installed.'
+"$VENV_PATH/bin/python" -I -c 'import importlib.metadata as m, sys; raise SystemExit(0 if m.version("dotunnel") == sys.argv[1] else 1)' "$WHEEL_VERSION" \
+    >/dev/null 2>&1 || fail "The requested dotunnel $WHEEL_VERSION package was not installed."
 [ -x "$VENV_PATH/bin/dotunnel" ] || fail 'The installed package did not expose its dotunnel command.'
 
 check_trusted_paths || fail 'Install parents changed or are not trusted; refusing to expose the launcher.'
@@ -222,7 +223,7 @@ PY
 LAUNCHER_CREATED=1
 ENV_CREATED=0 LAUNCHER_CREATED=0
 
-printf 'Installed dotunnel 0.1.4 in %s\n' "$VENV_PATH"
+printf 'Installed dotunnel %s in %s\n' "$WHEEL_VERSION" "$VENV_PATH"
 printf 'The official tunnel-client remains separate and was not installed or changed.\n'
 case ":${PATH:-}:" in
     *":$BIN_DIR:"*)

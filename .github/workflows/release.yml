@@ -1,0 +1,336 @@
+name: Draft Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Prepare and verify assets only; never create a release'
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: draft-release-automation-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Validate source and prepare release assets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      version: ${{ steps.gate.outputs.version }}
+      source_sha: ${{ steps.gate.outputs.source_sha }}
+      dry_run: ${{ steps.gate.outputs.dry_run }}
+    steps:
+      - name: Guard public repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REPOSITORY" != 'junited31/dotunnel' ]]; then
+            echo 'Release automation is restricted to junited31/dotunnel.' >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+
+      - name: Validate source and successful exact-SHA main CI
+        id: gate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REPOSITORY" != 'junited31/dotunnel' ]]; then
+            echo 'Release automation is restricted to junited31/dotunnel.' >&2
+            exit 1
+          fi
+          if [[ ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo 'GitHub event SHA is not a full lowercase commit SHA.' >&2
+            exit 1
+          fi
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          source_sha="$(git rev-parse --verify 'HEAD^{commit}')"
+          if [[ "$source_sha" != "$GITHUB_SHA" ]]; then
+            echo 'Checked-out commit does not match the event SHA.' >&2
+            exit 1
+          fi
+          package_version="$(python - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          project = tomllib.loads(Path('pyproject.toml').read_text(encoding='utf-8')).get('project', {})
+          if project.get('name') != 'dotunnel' or not isinstance(project.get('version'), str):
+              raise SystemExit('pyproject.toml must describe the public dotunnel package')
+          print(project['version'])
+          PY
+          )"
+          if [[ "$GITHUB_EVENT_NAME" == 'workflow_dispatch' ]]; then
+            dry_run="$INPUT_DRY_RUN"
+          else
+            dry_run='false'
+          fi
+          ci_runs="$RUNNER_TEMP/ci-workflow-runs.json"
+          gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/376166735/runs?head_sha=${source_sha}&event=push&branch=main&status=completed&per_page=100" \
+            > "$ci_runs"
+          python scripts/release.py validate-source \
+            --repository "$GITHUB_REPOSITORY" \
+            --event-name "$GITHUB_EVENT_NAME" \
+            --ref "$GITHUB_REF" \
+            --source-sha "$source_sha" \
+            --package-version "$package_version" \
+            --main-ref refs/remotes/origin/main \
+            --dry-run "$dry_run" \
+            --ci-runs "$ci_runs"
+          {
+            printf 'SOURCE_SHA=%s\n' "$source_sha"
+            printf 'RELEASE_VERSION=%s\n' "$package_version"
+            printf 'RELEASE_DRY_RUN=%s\n' "$dry_run"
+          } >> "$GITHUB_ENV"
+          {
+            printf 'version=%s\n' "$package_version"
+            printf 'source_sha=%s\n' "$source_sha"
+            printf 'dry_run=%s\n' "$dry_run"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and validate release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheel_dir="$RUNNER_TEMP/release-wheels"
+          output_dir="$RUNNER_TEMP/release-assets"
+          mkdir -m 700 "$wheel_dir"
+          source_date_epoch="$(git show -s --format=%ct "$SOURCE_SHA")"
+          if [[ ! "$source_date_epoch" =~ ^[0-9]+$ ]]; then
+            echo 'Unable to derive SOURCE_DATE_EPOCH from the validated source commit.' >&2
+            exit 1
+          fi
+          export SOURCE_DATE_EPOCH="$source_date_epoch"
+          python -m pip install --disable-pip-version-check build
+          python -m build --wheel --outdir "$wheel_dir"
+          shopt -s nullglob
+          wheels=("$wheel_dir"/*.whl)
+          if [[ "${#wheels[@]}" -ne 1 ]]; then
+            echo 'Expected exactly one built wheel.' >&2
+            exit 1
+          fi
+          python scripts/release.py prepare \
+            --version "$RELEASE_VERSION" \
+            --source-sha "$SOURCE_SHA" \
+            --wheel "${wheels[0]}" \
+            --installer install.sh \
+            --output "$output_dir"
+          (
+            cd "$output_dir"
+            sha256sum --check SHA256SUMS
+          )
+          {
+            printf '# Validated dotunnel release assets\n\n'
+            printf -- '- Repository: `%s`\n- Source SHA: `%s`\n- Version: `%s`\n- Dry run: `%s`\n\n' \
+              "$GITHUB_REPOSITORY" "$SOURCE_SHA" "$RELEASE_VERSION" "$RELEASE_DRY_RUN"
+            printf '## Release manifest\n\n```json\n'
+            cat "$output_dir/release-manifest.json"
+            printf '```\n\n## SHA256SUMS\n\n```text\n'
+            cat "$output_dir/SHA256SUMS"
+            printf '```\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-assets
+          path: ${{ runner.temp }}/release-assets
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  create-draft:
+    name: Create draft and attach verified assets
+    needs: prepare
+    if: github.event_name == 'push' && needs.prepare.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PREPARED_VERSION: ${{ needs.prepare.outputs.version }}
+      PREPARED_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+    steps:
+      - name: Guard public repository and tag event
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REPOSITORY" != 'junited31/dotunnel' ]]; then
+            echo 'Draft creation is restricted to junited31/dotunnel.' >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_EVENT_NAME" != 'push' ]]; then
+            echo 'Only canonical tag pushes may create a draft release.' >&2
+            exit 1
+          fi
+          if [[ ! "$PREPARED_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo 'Prepared version is not canonical MAJOR.MINOR.PATCH.' >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_REF" != "refs/tags/v${PREPARED_VERSION}" ]]; then
+            echo 'Prepared version does not match the pushed tag.' >&2
+            exit 1
+          fi
+          if [[ ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ || "$PREPARED_SOURCE_SHA" != "$GITHUB_SHA" ]]; then
+            echo 'Prepared source SHA does not match the push event.' >&2
+            exit 1
+          fi
+
+      - name: Confirm tag still resolves to the validated source commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="v${PREPARED_VERSION}"
+          reference="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}")"
+          object_type="$(jq -er '.object.type' <<<"$reference")"
+          object_sha="$(jq -er '.object.sha' <<<"$reference")"
+          target_sha=''
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            if [[ ! "$object_sha" =~ ^[0-9a-f]{40}$ ]]; then
+              echo 'Tag object contains an invalid Git SHA.' >&2
+              exit 1
+            fi
+            case "$object_type" in
+              commit)
+                target_sha="$object_sha"
+                break
+                ;;
+              tag)
+                annotated_tag="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${object_sha}")"
+                object_type="$(jq -er '.object.type' <<<"$annotated_tag")"
+                object_sha="$(jq -er '.object.sha' <<<"$annotated_tag")"
+                ;;
+              *)
+                echo 'Release tag does not resolve to a commit.' >&2
+                exit 1
+                ;;
+            esac
+          done
+          if [[ "$target_sha" != "$GITHUB_SHA" ]]; then
+            echo 'Release tag no longer points to the validated source commit.' >&2
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-assets
+          path: ${{ runner.temp }}/release-assets
+
+      - name: Verify same-run artifact without executing source or wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset_dir="$RUNNER_TEMP/release-assets"
+          wheel_name="dotunnel-${PREPARED_VERSION}-py3-none-any.whl"
+          manifest="$asset_dir/release-manifest.json"
+          sums="$asset_dir/SHA256SUMS"
+          if [[ ! -d "$asset_dir" || -L "$asset_dir" ]]; then
+            echo 'Release artifact directory is missing or unsafe.' >&2
+            exit 1
+          fi
+          if [[ "$(find "$asset_dir" -mindepth 1 -maxdepth 1 -type f | wc -l)" -ne 4 ]] || \
+             [[ -n "$(find "$asset_dir" -mindepth 1 -maxdepth 1 ! -type f -print -quit)" ]]; then
+            echo 'Release artifact has unexpected files or file types.' >&2
+            exit 1
+          fi
+          for name in "$wheel_name" install.sh SHA256SUMS release-manifest.json; do
+            if [[ ! -f "$asset_dir/$name" || -L "$asset_dir/$name" ]]; then
+              echo "Release artifact is missing a regular $name file." >&2
+              exit 1
+            fi
+          done
+          wheel_bytes="$(wc -c < "$asset_dir/$wheel_name" | tr -d '[:space:]')"
+          installer_bytes="$(wc -c < "$asset_dir/install.sh" | tr -d '[:space:]')"
+          manifest_bytes="$(wc -c < "$manifest" | tr -d '[:space:]')"
+          sums_bytes="$(wc -c < "$sums" | tr -d '[:space:]')"
+          if (( wheel_bytes < 1 || wheel_bytes > 16777216 || installer_bytes < 1 || installer_bytes > 1048576 || manifest_bytes > 32768 || sums_bytes > 1024 )); then
+            echo 'Release artifact exceeds an allowed asset size.' >&2
+            exit 1
+          fi
+          jq -e \
+            --arg version "$PREPARED_VERSION" \
+            --arg source "$GITHUB_SHA" \
+            --arg wheel "$wheel_name" \
+            '.version == $version and
+             .source_sha == $source and
+             (.assets | type == "array" and length == 2) and
+             ([.assets[].name] | sort) == ([$wheel, "install.sh"] | sort) and
+             all(.assets[]; (.size | type == "number") and (.size > 0) and
+                 (.sha256 | type == "string") and (.sha256 | test("^[0-9a-f]{64}$")))' \
+            "$manifest" > /dev/null
+          for name in "$wheel_name" install.sh; do
+            actual_size="$(wc -c < "$asset_dir/$name" | tr -d '[:space:]')"
+            expected_size="$(jq -er --arg name "$name" '.assets[] | select(.name == $name) | .size' "$manifest")"
+            expected_sha="$(jq -er --arg name "$name" '.assets[] | select(.name == $name) | .sha256' "$manifest")"
+            actual_sha="$(sha256sum "$asset_dir/$name")"
+            actual_sha="${actual_sha%% *}"
+            if [[ "$actual_size" != "$expected_size" || "$actual_sha" != "$expected_sha" ]]; then
+              echo "Asset bytes do not match the release manifest: $name" >&2
+              exit 1
+            fi
+          done
+          expected_sums="$RUNNER_TEMP/expected-SHA256SUMS"
+          jq -r '.assets | sort_by(.name)[] | "\(.sha256)  \(.name)"' "$manifest" > "$expected_sums"
+          if ! cmp -s "$expected_sums" "$sums"; then
+            echo 'SHA256SUMS does not match the release manifest.' >&2
+            exit 1
+          fi
+          (
+            cd "$asset_dir"
+            sha256sum --check SHA256SUMS
+          )
+
+      - name: Reject an existing release and create an unpublished draft
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="v${PREPARED_VERSION}"
+          releases="$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100")"
+          if ! jq -e 'type == "array" and all(.[]; type == "array") and all(.[][]; type == "object" and (.tag_name | type == "string"))' <<<"$releases" > /dev/null; then
+            echo 'Unable to inspect existing releases; refusing draft creation.' >&2
+            exit 1
+          fi
+          if jq -e --arg tag "$tag" 'any(.[][]; .tag_name == $tag)' <<<"$releases" > /dev/null; then
+            echo "A draft or published release already exists for $tag; refusing to overwrite it." >&2
+            exit 1
+          fi
+          notes="Prepared from source $GITHUB_SHA after successful main CI. Review this draft and its assets before publishing."
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+            --title "dotunnel $PREPARED_VERSION" --notes "$notes"
+          asset_dir="$RUNNER_TEMP/release-assets"
+          if ! gh release upload "$tag" --repo "$GITHUB_REPOSITORY" \
+              "$asset_dir/dotunnel-${PREPARED_VERSION}-py3-none-any.whl" \
+              "$asset_dir/install.sh" "$asset_dir/SHA256SUMS" "$asset_dir/release-manifest.json"; then
+            echo 'Asset attachment failed. The release remains a draft and requires maintainer review.' >&2
+            printf 'Asset attachment failed for `%s`; the release remains an unpublished draft.\n' "$tag" \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          printf 'Created draft `%s` from `%s`; it remains unpublished pending maintainer review.\n' \
+            "$tag" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"

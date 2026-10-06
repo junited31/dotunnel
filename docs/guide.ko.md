@@ -138,6 +138,30 @@ push 전 `git diff --cached`를 로컬에서 검토하고 runtime/key 파일이 
 
 미공개 기능은 별도 **private 저장소**를 만들고 public source를 clone한 뒤 private remote에 push해 개발하세요. public GitHub fork는 public이며 독립적으로 private으로 바꿀 수 없습니다([GitHub fork visibility](https://docs.github.com/en/pull-requests/reference/forks)). public upstream은 fetch용으로 두고 검토한 코드 변경만 공개하세요. private runtime 파일·운영 기록은 보내지 않습니다. 별도 private 개발 저장소는 선택 사항이며 실행 필수 요소가 아닙니다.
 
+## 8. 유지보수자 draft 릴리스
+
+source 변경은 feature branch와 PR로 반영합니다. public `main`은 GitHub Actions의 `Secret scan`, `Python 3.11`, `Python 3.13` 성공과 최신 base, 리뷰 대화 해결을 요구하며 관리자에게도 적용됩니다. main 직접 push·force-push·브랜치 삭제는 금지합니다.
+
+릴리스 workflow는 **draft만** 준비합니다. 배포할 정식 package 버전을 main에 merge하고 그 정확한 commit의 main CI 성공을 확인한 뒤 일치하는 stable tag를 push하세요. 예를 들어 main의 버전이 `0.1.5`일 때:
+
+```sh
+git fetch origin main
+git tag v0.1.5 origin/main
+git push origin v0.1.5
+```
+
+tag/package 불일치, main 이력 밖 source, 성공한 main CI 부재와 기존 release는 거부합니다. 읽기 전용 job이 universal wheel을 빌드·검증하고 크기/SHA를 고정한 `install.sh`, `SHA256SUMS`, source-SHA manifest를 생성합니다. 별도 draft 첨부 job만 저장소 write 권한을 사용하며 PAT·운영자·worker credential을 전달하지 않습니다. 전체 asset을 검토한 뒤 GitHub Releases에서 사람이 Publish하세요. 첨부 실패는 공개되지 않은 draft로 남고 workflow는 실패합니다. 기존 asset은 덮어쓰지 않습니다.
+
+tag 생성이나 Release 변경 없이 준비 과정을 확인하려면:
+
+```sh
+gh workflow run release.yml --ref main -f dry_run=true
+```
+
+해당 run의 summary와 검증 artifact를 확인하세요. dry-run은 준비 과정 검증이며 실제 draft 첨부나 공개 검증이 아닙니다. draft는 updater의 최신 안정 릴리스가 아니며 수동 Publish 후에만 배포 대상이 됩니다. 여기서 `gh`는 유지보수자 도구일 뿐 설치·updater 요구 사항이 아닙니다.
+
+각 준비된 릴리스에는 해당 wheel을 고정한 설치 스크립트가 포함됩니다. front page의 raw `main/install.sh`는 별도로 검토된 pin을 유지합니다. 기본 pin 갱신은 실제 공개 wheel의 byte 수와 SHA를 사용하는 일반 PR로 처리하며 자동 변경하지 않습니다. 이미 공개된 wheel의 checksum을 dry-run 재빌드 checksum으로 바꾸지 마세요.
+
 ## 추가 참고
 
 - [English front page](../README.md) · [한국어 front page](../README.ko.md)

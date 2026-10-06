@@ -138,6 +138,30 @@ Before pushing, review `git diff --cached` locally, verify that runtime/key file
 
 For unpublished feature work, create a separate **private repository**, clone the public source and push to that private remote. A public GitHub fork remains public and cannot independently become private; see [GitHub fork visibility](https://docs.github.com/en/pull-requests/reference/forks). Keep public upstream as a fetch source; publish only reviewed code changes, never private runtime files or operational history. A separate private development repository is optional, not a runtime requirement.
 
+## 8. Maintainer draft releases
+
+Publish source changes through a feature branch and PR. Public `main` requires `Secret scan`, `Python 3.11` and `Python 3.13` from GitHub Actions, an up-to-date base and resolved review conversations; these rules also apply to administrators. No direct main push, force-push or branch deletion.
+
+The release workflow prepares **drafts only**. For a release, merge the intended canonical package version into main and wait for its exact commit's main CI to succeed. Then push the matching stable tag. For example, after main declares `0.1.5`:
+
+```sh
+git fetch origin main
+git tag v0.1.5 origin/main
+git push origin v0.1.5
+```
+
+The workflow rejects a tag/package mismatch, a source outside main history, missing successful main CI and an existing release. Read-only jobs build and validate one universal wheel and generate its size/SHA-pinned `install.sh`, `SHA256SUMS` and source-SHA manifest. Only the separate draft attachment job has repository write permission; it uses no PAT, operator or worker credential. Inspect the complete assets before manually publishing the draft in GitHub Releases. A failed upload leaves a draft, not a partially published release; existing assets are never overwritten.
+
+To verify preparation without creating a tag or changing any Release:
+
+```sh
+gh workflow run release.yml --ref main -f dry_run=true
+```
+
+Inspect that run's summary and download its verification artifact. A dry-run verifies preparation, not live draft upload or publication. Drafts are not the updater's latest stable release; only manual Publish makes the version available. GitHub CLI here is a maintainer tool, not an installation/updater requirement.
+
+Every prepared release includes its own fixed-pin installer. The front-page raw `main/install.sh` remains an independently reviewed pin: advancing it requires a separate ordinary PR using the exact released wheel's byte count and SHA, and does not happen automatically. Do not substitute a dry-run rebuild's checksum for the already published wheel's checksum.
+
 ## Further reading
 
 - [Front page](../README.md) · [한국어 front page](../README.ko.md)

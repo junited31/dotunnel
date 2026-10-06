@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Prepare stable-tag GitHub Release drafts through exact-source/main-CI validation, read-only wheel preparation and a separate narrowly privileged asset attachment job; publication remains manual.
+- Provide read-only manual release dry-runs, checksum/source manifests and release-specific fixed-pin installers without rewriting the main installer pin or existing Release assets.
+- Document the protected-main publication flow and the distinction between preparation verification and live draft/publication verification.
+
 ## 0.1.4
 
 - Add a one-line Linux installer for the pinned 0.1.4 release. It verifies the wheel's size and SHA-256 before isolated, binary-only installation into a user-owned virtualenv, and refuses existing installations or unrelated launchers.
