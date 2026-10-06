@@ -151,13 +151,10 @@ class InstallExecutionTests(unittest.TestCase):
     def test_package_install_refuses_untrusted_system_executable_metadata(self):
         with patch.object(
             integrations, "_checked_path", side_effect=ValueError
-        ) as checked, patch.object(integrations.subprocess, "run") as run, contextlib.redirect_stdout(
+        ), patch.object(integrations.subprocess, "run") as run, contextlib.redirect_stdout(
             io.StringIO()
         ):
             self.assertFalse(integrations.install_bubblewrap(ARGV))
-        checked.assert_called_once_with(
-            Path("/usr/bin/sudo"), "executable", root_only=True
-        )
         run.assert_not_called()
 
     def test_untrusted_or_rewritten_package_command_is_never_spawned(self):

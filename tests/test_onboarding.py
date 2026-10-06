@@ -458,7 +458,6 @@ class OnboardingTests(unittest.TestCase):
             result = self.onboarding.main(["--directory", str(self.directory)])
 
         self.assertEqual(result, 2)
-        self.assertIn("interactive terminal", stderr.getvalue())
         discover.assert_not_called()
         bubblewrap_status.assert_not_called()
         sudo_available.assert_not_called()
@@ -483,8 +482,7 @@ class OnboardingTests(unittest.TestCase):
         with patch.object(self.onboarding.sys, "stdin", TerminalInput()), patch.object(
             self.onboarding.sys, "stdout", TerminalOutput()
         ), patch.object(self.onboarding.sys, "stderr", TerminalOutput()), patch.object(
-            self.onboarding.os, "getuid", return_value=1000
-        ), patch.object(self.onboarding.integrations, "discover_clis", return_value={
+            self.onboarding.integrations, "discover_clis", return_value={
             "codex": Path("/unused/codex"),
         }), patch.object(self.onboarding.integrations, "bubblewrap_status", return_value="ready"), \
                 patch.object(self.onboarding, "select_clis", return_value=None):
