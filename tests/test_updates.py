@@ -7,17 +7,89 @@ import hashlib
 import tempfile
 from pathlib import Path
 import zipfile
+import json
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from dotunnel import updates
 
-from dotunnel.operator import main
 
+class GitHubTransportTests(unittest.TestCase):
+    @contextlib.contextmanager
+    def server(self, body, *, status=200, headers=None):
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                code = 403 if self.headers.get('Authorization') else status
+                self.send_response(code)
+                for name, value in (headers or {}).items():
+                    self.send_header(name, value)
+                self.send_header('Connection', 'close')
+                self.end_headers()
+                self.wfile.write(body)
 
-class UpdateCommandTests(unittest.TestCase):
-    def test_missing_github_cli_fails_the_version_check(self):
-        with patch('shutil.which', return_value=None), contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(main(['update']), 2)
+            def log_message(self, *args):
+                return
 
+        server = HTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with patch.object(updates, '_API_URL', f'http://127.0.0.1:{server.server_port}', create=True):
+                yield
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+    def test_latest_check_succeeds_without_gh_or_provider_auth(self):
+        body = json.dumps({'tag_name': 'v0.1.1', 'draft': False,
+                           'prerelease': False, 'assets': []}).encode()
+        with self.server(body), patch('shutil.which', return_value=None), \
+             patch.dict(os.environ, {'GH_TOKEN': 'unused-synthetic-token',
+                                     'GITHUB_TOKEN': 'unused-synthetic-token'}), \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(updates.run_update('0.1.1'), 0)
+
+    def test_binary_download_preserves_response_bytes(self):
+        body = bytes(range(256)) * 300
+        with self.server(body), tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / 'wheel.whl'
+            updates._github_output('releases/assets/7', target, binary=True)
+            self.assertEqual(target.read_bytes(), body)
+
+    def test_http_errors_fail_closed(self):
+        for status in (403, 404, 429, 500):
+            with self.subTest(status=status), self.server(b'error', status=status), \
+                 tempfile.TemporaryDirectory() as temporary, self.assertRaises(updates.UpdateError):
+                updates.latest_release(Path(temporary))
+
+    def test_oversized_metadata_is_rejected_without_content_length(self):
+        with self.server(b' ' * (1024 * 1024 + 1)), \
+             tempfile.TemporaryDirectory() as temporary, self.assertRaises(updates.UpdateError):
+            updates.latest_release(Path(temporary))
+
+    def test_oversized_wheel_is_rejected_before_download(self):
+        with self.server(b'', headers={'Content-Length': str(17 * 1024 * 1024)}), \
+             tempfile.TemporaryDirectory() as temporary, self.assertRaises(updates.UpdateError):
+            updates._github_output('releases/assets/7', Path(temporary) / 'wheel.whl', binary=True)
+
+    def test_truncated_response_is_rejected_even_if_json_is_valid(self):
+        body = json.dumps({'tag_name': 'v0.1.1', 'draft': False,
+                           'prerelease': False, 'assets': []}).encode()
+        with self.server(body, headers={'Content-Length': str(len(body) + 1)}), \
+             tempfile.TemporaryDirectory() as temporary, self.assertRaises(updates.UpdateError):
+            updates.latest_release(Path(temporary))
+
+    def test_invalid_json_is_not_a_successful_check(self):
+        with self.server(b'not JSON'), tempfile.TemporaryDirectory() as temporary, \
+             self.assertRaises(updates.UpdateError):
+            updates.latest_release(Path(temporary))
+
+    def test_redirect_cannot_downgrade_to_plain_http(self):
+        with self.server(b'', status=302, headers={'Location': 'http://127.0.0.1:1/insecure'}), \
+             tempfile.TemporaryDirectory() as temporary, self.assertRaises(updates.UpdateError):
+            updates.latest_release(Path(temporary))
 
 class TerminalInput(io.StringIO):
     def isatty(self):
@@ -91,7 +163,6 @@ class UpdateConsentTests(unittest.TestCase):
         terminal = TerminalInput if interactive else io.StringIO
         with patch.object(updates, 'latest_release', return_value=data or release_data()), \
              patch.object(updates, '_installer', return_value=['unused-installer']), \
-             patch('shutil.which', return_value='missing-gh-fixture'), \
              patch('sys.stdin', terminal(answer)), patch('sys.stdout', terminal()), \
              contextlib.redirect_stderr(io.StringIO()):
             return updates.run_update(current)

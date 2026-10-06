@@ -45,7 +45,7 @@ Setup and doctor require Linux and a non-root user; setup also requires an inter
 A new setup is created after prompts. An existing directory reconfigures only setup-owned CLI
 integrations and preserves its existing key/profile. Credentials use the hidden prompt; never put
 secrets in command arguments.
-Update requires gh and checks the latest stable GitHub release. A newer version prompts [Y/n];
+Update checks GitHub releases over HTTPS without gh or GitHub login. A newer version prompts [Y/n];
 Enter approves, n cancels. Installation requires a non-root Linux, non-editable virtualenv.
 Update never restarts services. Doctor is read-only: it does not start a Tunnel client or make a
 model request, and reports readiness only when observed from the local health endpoint.

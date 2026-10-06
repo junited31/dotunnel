@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from email.parser import BytesParser
+from http.client import HTTPException
 import hashlib
 import importlib.metadata
 import importlib.util
@@ -10,17 +11,22 @@ import json
 import os
 from pathlib import Path
 import re
-import selectors
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import zipfile
 
 REPOSITORY = 'junited31/dotunnel'
 _VERSION = re.compile(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)')
 _MAX_WHEEL = 16 * 1024 * 1024
+_MAX_METADATA = 1024 * 1024
+_REQUEST_TIMEOUT = 60
+_API_URL = f'https://api.github.com/repos/{REPOSITORY}'
 
 
 class UpdateError(Exception):
@@ -72,48 +78,54 @@ def parse_release(data: object) -> Release:
     return Release(version, identity, filename, size, digest[7:])
 
 
-def _github_output(gh: str, endpoint: str, target: Path, *, binary: bool = False) -> None:
-    command = [gh, 'api', '--hostname', 'github.com', f'repos/{REPOSITORY}/{endpoint}']
-    if binary:
-        command += ['--header', 'Accept: application/octet-stream']
-    else:
-        command += ['--jq', '{tag_name,draft,prerelease,assets:[.assets[]|{id,name,size,digest}]}']
-    limit = _MAX_WHEEL if binary else 1024 * 1024
+class _HTTPSRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urllib.parse.urlsplit(newurl).scheme != 'https':
+            raise UpdateError('GitHub redirected to an insecure download URL.')
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _github_output(endpoint: str, target: Path, *, binary: bool = False) -> None:
+    request = urllib.request.Request(f'{_API_URL}/{endpoint}', headers={
+        'Accept': 'application/octet-stream' if binary else 'application/vnd.github+json',
+        'User-Agent': 'dotunnel-updater',
+        'X-GitHub-Api-Version': '2022-11-28',
+    })
+    limit = _MAX_WHEEL if binary else _MAX_METADATA
+    deadline = time.monotonic() + _REQUEST_TIMEOUT
     try:
-        with target.open('xb') as output, subprocess.Popen(
-            command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-        ) as process:
-            assert process.stdout is not None
-            deadline = time.monotonic() + 60
-            size = 0
+        opener = urllib.request.build_opener(_HTTPSRedirect())
+        with opener.open(request, timeout=_REQUEST_TIMEOUT) as response, target.open('xb') as output:
+            declared = response.headers.get('Content-Length')
             try:
-                with selectors.DefaultSelector() as selector:
-                    selector.register(process.stdout, selectors.EVENT_READ)
-                    while True:
-                        remaining = deadline - time.monotonic()
-                        if remaining <= 0 or not selector.select(remaining):
-                            raise UpdateError('GitHub release access timed out.')
-                        chunk = os.read(process.stdout.fileno(), 65536)
-                        if not chunk:
-                            break
-                        size += len(chunk)
-                        if size > limit:
-                            raise UpdateError('GitHub response exceeds the supported size limit.')
-                        output.write(chunk)
-                result = process.wait(timeout=max(0.01, deadline - time.monotonic()))
-            finally:
-                if process.poll() is None:
-                    process.kill()
-                    process.wait()
-    except (OSError, subprocess.TimeoutExpired) as error:
-        raise UpdateError('GitHub access failed or timed out; check gh installation/authentication and connectivity.') from error
-    if result:
-        raise UpdateError('GitHub release access failed; check gh authentication, repository access and published releases.')
+                expected = int(declared) if declared is not None else None
+            except ValueError as error:
+                raise UpdateError('GitHub returned an invalid response size.') from error
+            if expected is not None and not 0 <= expected <= limit:
+                raise UpdateError('GitHub response exceeds the supported size limit.')
+            size = 0
+            while True:
+                if time.monotonic() >= deadline:
+                    raise UpdateError('GitHub release access timed out.')
+                chunk = response.read1(min(65536, limit + 1 - size))
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > limit:
+                    raise UpdateError('GitHub response exceeds the supported size limit.')
+                output.write(chunk)
+            if expected is not None and size != expected:
+                raise UpdateError('GitHub response ended before its declared size.')
+    except urllib.error.HTTPError as error:
+        error.close()
+        raise UpdateError(f'GitHub release access failed (HTTP {error.code}); check the public release and GitHub rate limits.') from error
+    except (OSError, HTTPException) as error:
+        raise UpdateError('GitHub access failed or timed out; check network connectivity and TLS trust.') from error
 
 
-def latest_release(gh: str, directory: Path) -> object:
+def latest_release(directory: Path) -> object:
     target = directory / 'release.json'
-    _github_output(gh, 'releases/latest', target)
+    _github_output('releases/latest', target)
     try:
         return json.loads(target.read_bytes())
     except (ValueError, UnicodeError) as error:
@@ -186,12 +198,9 @@ def run_update(current_version: str, local_development: bool = False) -> int:
     print(f'Update source: GitHub Releases ({REPOSITORY})')
     try:
         current = version_key(current_version)
-        gh = shutil.which('gh')
-        if not gh:
-            raise UpdateError('GitHub CLI (gh) is required; install it and authenticate for private repository access.')
         with tempfile.TemporaryDirectory(prefix='dotunnel-update-') as temporary:
             directory = Path(temporary)
-            metadata = latest_release(gh, directory)
+            metadata = latest_release(directory)
             latest = release_version(metadata)
             print(f'Latest stable version: {latest}')
             available = version_key(latest)
@@ -205,7 +214,7 @@ def run_update(current_version: str, local_development: bool = False) -> int:
                 print('Update cancelled; installation unchanged.')
                 return 0
             wheel = directory / release.filename
-            _github_output(gh, f'releases/assets/{release.asset_id}', wheel, binary=True)
+            _github_output(f'releases/assets/{release.asset_id}', wheel, binary=True)
             verify_wheel(wheel, release)
             environment = os.environ.copy()
             for key in ('PIP_TARGET', 'PIP_PREFIX', 'PIP_USER', 'UV_TARGET', 'UV_PREFIX'):
