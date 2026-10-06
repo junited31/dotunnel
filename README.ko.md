@@ -24,7 +24,7 @@ Linux용 **자체 설치형 stdio MCP 서버**와 private Secure MCP Tunnel 연�
 - 의존성 설치용 PyPI 접근. `uv`를 쓰면 [공식 설치 안내](https://docs.astral.sh/uv/getting-started/installation/)를 참고하세요.
 - `dotunnel update`용 GitHub CLI(`gh`)와 로그인.
 - ChatGPT 연결은 별도: 개발자 모드 자격, Platform Tunnel 권한, workspace association, Tunnel ID, runtime key, 공식 tunnel-client.
-- 선택 CLI 작업: `/usr/bin/bwrap`(bubblewrap)과 설치·로그인된 Codex/Claude Code/OMP.
+- 선택 CLI 연동에만: Bubblewrap(`/usr/bin/bwrap`, 관리자가 sudo로 설치)과 설치·로그인된 Codex/Claude Code/OMP. setup이 확인하고 설치 명령을 안내합니다.
 
 ## 1. 실행 계정 선택
 
@@ -137,7 +137,17 @@ setup은 한 흐름으로 안내합니다.
 
 ChatGPT 앱에는 Platform runtime key를 입력하지 않습니다. 연결 방식은 **Tunnel**, 입력은 **Tunnel ID**입니다. 로컬 stdio MCP에는 별도 OAuth가 없습니다. 앱 선택 메뉴 위치는 UI/계정별로 다르며, 선택이 보이지 않으면 등록한 앱 이름과 도구를 명시해 호출을 요청하세요. 서버 client가 실행 중이어야 실제 호출이 됩니다.
 
-### 선택: 설치된 Codex·Claude Code·OMP 연동
+### Bubblewrap 확인과 선택 CLI 연동
+
+setup은 구성 doctor 다음에 항상 Bubblewrap을 확인합니다. `/usr/bin/bwrap`이 있는지와 **CLI 작업이 쓰는 격리 namespace를 실제로 만들 수 있는지**를 함께 봅니다. 기본 기능(Tunnel, 파일 도구, 고정 작업)에는 필요하지 않습니다.
+
+- **ready:** CLI가 설치돼 있으면 선택 목록을 엽니다.
+- **설치 안 됨:** 배포판에 맞는 설치 명령을 보여 줍니다. 예: `sudo apt install bubblewrap`(Debian/Ubuntu), `sudo dnf install bubblewrap`(Fedora/RHEL), `sudo pacman -S bubblewrap`(Arch), `sudo zypper install bubblewrap`(openSUSE), `sudo apk add bubblewrap`(Alpine). dotunnel이 sudo를 직접 실행하지는 않습니다.
+- **설치됐지만 사용 불가:** 커널·AppArmor·컨테이너 정책이 비특권 user namespace를 막고 있습니다. 관리자가 bwrap에 허용해야 합니다.
+
+CLI가 설치돼 있는데 Bubblewrap이 준비되지 않았으면 setup이 기다립니다. sudo 권한이 있는 계정의 다른 터미널에서 안내된 명령을 실행한 뒤 Enter를 누르면 다시 확인하고 같은 실행에서 선택 목록으로 이어집니다. `s`를 입력하면 건너뜁니다. 건너뛰어도 기본 설정은 유지되며, 나중에 `dotunnel setup --directory DIR`로 연동을 켤 수 있습니다. `dotunnel doctor`도 같은 상태를 보여 줍니다.
+
+**이 때문에 실행 계정에 sudo를 주지 마세요.** 고정 작업과 CLI 작업은 실행 계정 권한으로 돌기 때문에, sudo 가능한(특히 비밀번호 없는) 실행 계정이면 root까지 닿을 수 있습니다. Bubblewrap은 시스템 전체에 설치되므로 관리자 계정에서 한 번만 설치하면 됩니다.
 
 안전한 PATH 실행 파일이 확인된 CLI만 목록에 나타납니다. 탐지는 CLI를 실행하지 않으며, 설치된 CLI가 없으면 이 단계를 건너뜁니다.
 
@@ -152,7 +162,7 @@ Select installed native CLI integrations
 
 - 이미 설치된 CLI를 다시 내려받지 않습니다. `cli-job` wrapper의 고정 작업을 등록합니다.
 - 선택한 backend마다 native runtime 경로, 인증 파일 **참조 경로**, target alias, source root, 허용 파일, editable subset을 입력합니다. source root는 MCP workspace와 분리하고, editable을 비우면 review 전용입니다. Claude는 `/login` 파일이 아닌 장기 토큰 파일이 필요합니다(아래 Claude 절).
-- `/usr/bin/bwrap`이 필수입니다. setup은 존재·metadata만 확인하며 namespace 실행 가능 여부나 provider 로그인 성공을 증명하지 않습니다. 실행 시 격리가 불가능하면 거부합니다.
+- setup은 provider 로그인 성공을 증명하지 않습니다. 실행 시점에도 격리가 불가능하면 작업을 거부합니다.
 - 모든 선택을 검증한 뒤 registry를 한 번에 교체합니다. 실패하면 일부 CLI만 활성화하지 않으며, 같은 선택을 반복해도 registry는 바뀌지 않습니다.
 - 고정 작업 이름은 `dotunnel-codex`, `dotunnel-claude`, `dotunnel-omp`. 운영자 설정은 `DIR/cli-jobs/<backend>.json`, 호출자 요청은 `workspace/dotunnel-requests/<backend>.json`이며 기본 요청은 review입니다. 등록만으로는 모델을 실행하지 않습니다.
 - 해제는 해당 setup-owned task만 제거하고 설정·요청 파일은 보존합니다. 다른 task·key/profile은 바꾸지 않습니다.

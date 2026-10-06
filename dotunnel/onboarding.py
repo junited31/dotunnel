@@ -892,14 +892,29 @@ def configure_directory(
     *,
     selector_fn: Callable[[Mapping[str, Path], set[str]], set[str] | None] | None = None,
     prompt_fn: Callable[[str], str] | None = None,
+    bubblewrap_fn: Callable[[], str] | None = None,
 ) -> bool:
     available = _available(installed)
+    check = (lambda: integrations.bubblewrap_status(_BWRAP)) if bubblewrap_fn is None else bubblewrap_fn
     state = _read_registry(directory)
     try:
+        status = check()
+        integrations.print_bubblewrap_status(status)
         if not available:
             print("No installed Codex, Claude Code, or OMP CLI was found on PATH; optional integrations were skipped.")
             print("Install any native CLI separately, then rerun `dotunnel setup` to select its wrapper integration.")
             return True
+        while status != "ready":
+            answer = _prompt(
+                prompt_fn,
+                "Install Bubblewrap in another terminal, then press Enter to check again, or type s to skip CLI integrations: ",
+            ).lower()
+            if answer in ("s", "skip"):
+                print("Optional CLI integrations skipped; setup configuration was not changed.")
+                print(f"After installing Bubblewrap, run `dotunnel setup --directory {state.directory}` to enable them.")
+                return True
+            status = check()
+            integrations.print_bubblewrap_status(status)
         active = _owned_tasks(state.document, state.directory)
         initial = set(active) & set(available)
         choose = select_clis if selector_fn is None else selector_fn

@@ -196,7 +196,7 @@ class OperatorTests(unittest.TestCase):
             directory, _, _, client = self.make_setup(base, [task])
             self.start_ready_tunnel(directory)
             with patch('dotunnel.integrations.discover_clis', return_value={'codex': Path('/usr/bin/codex')}), \
-                    patch('dotunnel.operator._bwrap_available', return_value=True):
+                    patch('dotunnel.operator._bubblewrap_status', return_value='ready'):
                 code, stdout, stderr = self.invoke([
                     'doctor', '--directory', str(directory), '--tunnel-client', str(client),
                 ])
@@ -214,7 +214,7 @@ class OperatorTests(unittest.TestCase):
             before = backend.read_bytes()
             self.start_ready_tunnel(directory)
             with patch('dotunnel.integrations.discover_clis', return_value={'codex': Path('/usr/bin/codex')}), \
-                    patch('dotunnel.operator._bwrap_available', return_value=True):
+                    patch('dotunnel.operator._bubblewrap_status', return_value='ready'):
                 code, stdout, stderr = self.invoke([
                     'doctor', '--directory', str(directory), '--tunnel-client', str(client),
                 ])
@@ -239,7 +239,7 @@ class OperatorTests(unittest.TestCase):
             auth_before = auth_reference.stat()
             with patch('dotunnel.integrations.discover_clis', return_value={'codex': Path('/usr/bin/codex')}), \
                     patch('dotunnel.integrations._check_bwrap'), \
-                    patch('dotunnel.operator._bwrap_available', return_value=True):
+                    patch('dotunnel.operator._bubblewrap_status', return_value='ready'):
                 code, stdout, stderr = self.invoke([
                     'doctor', '--directory', str(directory), '--tunnel-client', str(client),
                 ])
@@ -265,7 +265,7 @@ class OperatorTests(unittest.TestCase):
             self.start_ready_tunnel(directory)
             with patch('dotunnel.integrations.discover_clis', return_value={'codex': Path('/usr/bin/codex')}), \
                     patch('dotunnel.integrations.validate_managed_job', return_value=True), \
-                    patch('dotunnel.operator._bwrap_available', return_value=True):
+                    patch('dotunnel.operator._bubblewrap_status', return_value='ready'):
                 code, stdout, stderr = self.invoke([
                     'doctor', '--directory', str(directory), '--tunnel-client', str(client),
                 ])

@@ -114,10 +114,10 @@ def _safe_regular_file(path: Path, *, executable: bool = False, private: bool = 
             os.close(parent_fd)
 
 
-def _bwrap_available() -> bool:
-    from .cli_backend import _BWRAP
+def _bubblewrap_status() -> str:
+    from .integrations import BWRAP_PATH, bubblewrap_status
 
-    return _safe_regular_file(_BWRAP, executable=True)
+    return bubblewrap_status(BWRAP_PATH)
 
 
 def _local_readiness(health_file: Path) -> tuple[bool, bool]:
@@ -245,12 +245,14 @@ def _diagnose(argv: list[str]) -> int:
             checks_ok = False
 
     try:
-        sandbox_available = _bwrap_available()
+        sandbox_status = _bubblewrap_status()
     except Exception:
-        sandbox_available = False
-    print("Bubblewrap: " + ("available." if sandbox_available else "unavailable."))
-    if configured_names and not sandbox_available:
-        print("Configured CLI integrations require Bubblewrap.")
+        sandbox_status = "unusable"
+    from .integrations import print_bubblewrap_status
+
+    print_bubblewrap_status(sandbox_status)
+    if configured_names and sandbox_status != "ready":
+        print("Configured CLI integrations require a working Bubblewrap.")
         checks_ok = False
 
     profile = directory / "profile.yaml"

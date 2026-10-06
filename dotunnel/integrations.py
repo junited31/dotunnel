@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shutil
 import stat
+import subprocess
 from typing import Any
 
 from . import cli_backend, cli_jobs, config as config_helpers
@@ -241,6 +242,83 @@ def _check_bwrap(path: Path) -> None:
         raise ValueError("Bubblewrap is required at /usr/bin/bwrap for native CLI integrations") from None
     if info.st_mode & 0o022:
         raise ValueError("Bubblewrap is required at /usr/bin/bwrap for native CLI integrations")
+
+
+_PROBE_TARGET = next((path for path in ("/usr/bin/true", "/bin/true") if os.path.exists(path)), "/bin/true")
+
+
+def bubblewrap_status(path: Path = BWRAP_PATH) -> str:
+    """Return "ready", "missing" or "unusable" without trusting presence alone.
+
+    The probe asks for the same namespace isolation as real CLI jobs, so a
+    binary that exists but cannot create namespaces (kernel, AppArmor or
+    container policy) is reported as unusable rather than ready.
+    """
+    try:
+        _check_bwrap(path)
+    except ValueError:
+        return "missing"
+    command = [
+        str(path), "--die-with-parent", "--unshare-all", "--cap-drop", "ALL",
+        "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", _PROBE_TARGET,
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env={"PATH": os.defpath, "LANG": "C.UTF-8"},
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unusable"
+    return "ready" if result.returncode == 0 else "unusable"
+
+
+_INSTALL_COMMANDS = (
+    ({"debian", "ubuntu"}, "sudo apt install bubblewrap"),
+    ({"fedora", "rhel", "centos"}, "sudo dnf install bubblewrap"),
+    ({"arch"}, "sudo pacman -S bubblewrap"),
+    ({"opensuse", "suse", "sles"}, "sudo zypper install bubblewrap"),
+    ({"alpine"}, "sudo apk add bubblewrap"),
+)
+
+
+def bubblewrap_install_command(os_release: Path = Path("/etc/os-release")) -> str | None:
+    """Suggest the distribution's install command; never runs it."""
+    try:
+        text = os_release.read_text(encoding="utf-8", errors="replace")[:65536]
+    except OSError:
+        return None
+    families: list[str] = []
+    for line in text.splitlines():
+        key, _, value = line.partition("=")
+        if key.strip() in ("ID", "ID_LIKE"):
+            families += value.strip().strip("'\"").lower().split()
+    for family in families:
+        for names, command in _INSTALL_COMMANDS:
+            if family in names or any(family.startswith(name + "-") for name in names):
+                return command
+    return None
+
+
+def print_bubblewrap_status(status: str) -> None:
+    """Explain readiness for optional CLI integrations; the core MCP never needs it."""
+    if status == "ready":
+        print("Bubblewrap: ready (required only for optional Codex/Claude Code/OMP integrations).")
+        return
+    if status == "missing":
+        print("Bubblewrap: not installed. It is required only for optional Codex/Claude Code/OMP integrations;")
+        print("the Tunnel connection, file tools and fixed tasks work without it.")
+        command = bubblewrap_install_command()
+        if command:
+            print(f"Install it from an account with sudo rights: {command}")
+        else:
+            print("Install the 'bubblewrap' package (providing /usr/bin/bwrap) with your distribution's package manager, using sudo.")
+    else:
+        print("Bubblewrap: installed but cannot create isolated namespaces here (kernel, AppArmor or container policy).")
+        print("Optional CLI integrations stay unavailable until an administrator allows unprivileged user namespaces for bwrap.")
 
 
 def _validate_job_data(

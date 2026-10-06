@@ -24,7 +24,7 @@ Each user **installs it on their own server**. It is not a hosted service, a pub
 - PyPI access to install dependencies. For `uv`, see the [official installation guide](https://docs.astral.sh/uv/getting-started/installation/).
 - GitHub CLI (`gh`), logged in, for `dotunnel update`.
 - ChatGPT connection prerequisites, obtained separately: developer-mode eligibility, Platform Tunnel permissions, workspace association, a Tunnel ID, a runtime key and the official tunnel-client.
-- Optional CLI tasks: `/usr/bin/bwrap` (bubblewrap) and an installed, logged-in Codex/Claude Code/OMP.
+- Optional CLI integrations only: Bubblewrap (`/usr/bin/bwrap`, installed by an administrator with sudo) and an installed, logged-in Codex/Claude Code/OMP. setup checks it and shows the install command.
 
 ## 1. Choose the runtime account
 
@@ -137,7 +137,17 @@ If you do not start it, it shows `NOT CONNECTED` and a manual command containing
 
 Never enter the Platform runtime key in the ChatGPT app. The connection type is **Tunnel** and the input is the **Tunnel ID**. The local stdio MCP has no separate OAuth. Where the app picker appears depends on the account/UI; if you cannot find it, ask for a call that names the registered app and tool. Calls only work while the server's client is running.
 
-### Optional: integrate installed Codex, Claude Code and OMP
+### Bubblewrap check and optional CLI integrations
+
+After the configuration doctor, setup always checks Bubblewrap: whether `/usr/bin/bwrap` exists **and** can actually create the isolated namespaces CLI jobs use. The core (Tunnel, file tools, fixed tasks) never needs it.
+
+- **ready:** CLI selection opens (if any CLI is installed).
+- **not installed:** setup shows the install command for your distribution, for example `sudo apt install bubblewrap` (Debian/Ubuntu), `sudo dnf install bubblewrap` (Fedora/RHEL), `sudo pacman -S bubblewrap` (Arch), `sudo zypper install bubblewrap` (openSUSE) or `sudo apk add bubblewrap` (Alpine). dotunnel never runs sudo itself.
+- **installed but unusable:** the kernel, AppArmor or container policy blocks unprivileged user namespaces; an administrator must allow them for bwrap.
+
+If CLIs are installed but Bubblewrap is not ready, setup waits: run the command in another terminal from an account with sudo rights, then press Enter to check again and continue to the selection in the same run, or type `s` to skip. Skipping keeps the base setup; later run `dotunnel setup --directory DIR` to enable integrations. `dotunnel doctor` reports the same status.
+
+**Do not give the runtime account sudo just for this.** Fixed tasks and CLI jobs run with that account's permissions, so a sudo-capable (especially passwordless) runtime account lets them reach root. Install Bubblewrap once from an administrator account; the package is system-wide.
 
 Only CLIs with a safe executable on PATH are listed. Detection never runs the CLI; if none is installed this step is skipped.
 
@@ -152,7 +162,7 @@ Select installed native CLI integrations
 
 - It does not re-download installed CLIs. It registers fixed tasks for the `cli-job` wrapper.
 - For each selected backend you enter the native runtime path, auth file **reference path**, target alias, source root, allowed files and the editable subset. Keep the source root separate from the MCP workspace; an empty editable list means review only. Claude needs a long-lived token file, not the `/login` file (see Claude below).
-- `/usr/bin/bwrap` is required. setup checks only existence/metadata and does not prove that namespaces work or that provider login succeeds. Jobs refuse to run when isolation is unavailable.
+- Provider login is not proven by setup; jobs still refuse to run whenever isolation is unavailable.
 - All selections are validated, then the task registry is replaced at once. On failure no partial set of CLIs is enabled, and repeating the same selection does not change the registry.
 - Fixed task names are `dotunnel-codex`, `dotunnel-claude`, `dotunnel-omp`. Operator configs are `DIR/cli-jobs/<backend>.json`, caller requests `workspace/dotunnel-requests/<backend>.json`, and the default request is review. Registration alone never runs a model.
 - Deselecting removes only that setup-owned task and keeps its config/request files. Other tasks and the key/profile are unchanged.

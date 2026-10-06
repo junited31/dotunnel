@@ -328,6 +328,7 @@ class OnboardingTests(unittest.TestCase):
                 installed,
                 selector_fn=selector,
                 prompt_fn=lambda _prompt: next(codex_answers),
+                bubblewrap_fn=lambda: "ready",
             )
             selected = {"claude"}
             claude_answers = iter((
@@ -343,6 +344,7 @@ class OnboardingTests(unittest.TestCase):
                 installed,
                 selector_fn=selector,
                 prompt_fn=lambda _prompt: next(claude_answers),
+                bubblewrap_fn=lambda: "ready",
             )
 
         self.assertEqual(initial_states, [set(), {"codex"}])
@@ -363,6 +365,7 @@ class OnboardingTests(unittest.TestCase):
             self.directory,
             {"codex": Path("/unused/codex")},
             selector_fn=lambda _installed, _initially_selected: None,
+            bubblewrap_fn=lambda: "ready",
         )
         self.assertFalse(result)
         self.assertEqual(config_path.read_bytes(), before)
@@ -378,6 +381,7 @@ class OnboardingTests(unittest.TestCase):
                 self.directory,
                 {},
                 selector_fn=lambda *_args: self.fail("selector must be skipped"),
+                bubblewrap_fn=lambda: "ready",
             )
         self.assertTrue(result)
         self.assertIn("No installed Codex, Claude Code, or OMP CLI", output.getvalue())
@@ -433,7 +437,8 @@ class OnboardingTests(unittest.TestCase):
         key_before = self._file_identity(self.directory / "runtime-api-key")
         with patch.object(self.onboarding.integrations, "discover_clis", return_value={
             "codex": Path("/unused/codex"),
-        }), patch.object(self.onboarding, "select_clis", return_value=None):
+        }), patch.object(self.onboarding.integrations, "bubblewrap_status", return_value="ready"), \
+                patch.object(self.onboarding, "select_clis", return_value=None):
             result = self.onboarding.main(["--directory", str(self.directory)])
 
         self.assertEqual(result, 130)
