@@ -79,6 +79,104 @@ class SupervisionStateTests(unittest.TestCase):
         self.assertEqual(reopened.epoch, epoch)
         self.assertEqual(reopened.key, key)
 
+    def test_initialization_accepts_precreated_state_in_readonly_parent(self):
+        from dotunnel.supervision_state import SupervisionState
+
+        if os.getuid() == 0:
+            self.skipTest("root bypasses the directory write permission boundary")
+        parent = self.base / "readonly-parent"
+        parent.mkdir(mode=0o700)
+        existing = parent / "state"
+        existing.mkdir(mode=0o700)
+        original_inode = existing.stat().st_ino
+        parent.chmod(0o500)
+        initialized = None
+        reopened = None
+        try:
+            initialized = SupervisionState.initialize(existing)
+
+            async def write_approval(state):
+                async with state.lock():
+                    state.set_approval("connection:project", "generation", True)
+
+            asyncio.run(write_approval(initialized))
+            initialized.close()
+            initialized = None
+            reopened = SupervisionState(existing)
+
+            async def read_approval():
+                async with reopened.lock():
+                    self.assertTrue(reopened.approved("connection:project", "generation"))
+
+            asyncio.run(read_approval())
+            self.assertEqual(existing.stat().st_ino, original_inode)
+        finally:
+            if initialized is not None:
+                initialized.close()
+            if reopened is not None:
+                reopened.close()
+            parent.chmod(0o700)
+
+    def test_readonly_parent_does_not_bypass_unsafe_owner_file(self):
+        from dotunnel.supervision_config import SupervisionError
+        from dotunnel.supervision_state import SupervisionState, _owner_lock_name
+
+        if os.getuid() == 0:
+            self.skipTest("root bypasses the directory write permission boundary")
+        for label, contents, mode in (("contents", b"not-empty", 0o600), ("inaccessible", b"", 0o000)):
+            with self.subTest(label=label):
+                parent = self.base / label
+                parent.mkdir(mode=0o700)
+                existing = parent / "state"
+                existing.mkdir(mode=0o700)
+                guard = parent / _owner_lock_name(existing.name)
+                guard.write_bytes(contents)
+                guard.chmod(mode)
+                parent.chmod(0o500)
+                try:
+                    with self.assertRaises(SupervisionError) as refused:
+                        unexpected = SupervisionState.initialize(existing)
+                        unexpected.close()
+                    self.assert_code(refused.exception, "state_unsafe")
+                    self.assertEqual(list(existing.iterdir()), [])
+                finally:
+                    parent.chmod(0o700)
+                    guard.chmod(0o600)
+
+    def test_readonly_parent_transition_never_creates_root_without_guard(self):
+        from unittest.mock import patch
+        from dotunnel.supervision_config import SupervisionError
+        from dotunnel.supervision_state import SupervisionState
+
+        if os.getuid() == 0:
+            self.skipTest("root bypasses the directory write permission boundary")
+        parent = self.base / "readonly-transition"
+        parent.mkdir(mode=0o700)
+        existing = parent / "missing-state"
+        parent.chmod(0o500)
+        real_open = os.open
+        changed = []
+
+        def make_parent_writable_after_creation_denial(path, flags, *args, **kwargs):
+            try:
+                return real_open(path, flags, *args, **kwargs)
+            except PermissionError:
+                if flags & os.O_CREAT:
+                    parent.chmod(0o700)
+                    changed.append(True)
+                raise
+
+        try:
+            with patch("os.open", make_parent_writable_after_creation_denial):
+                with self.assertRaises(SupervisionError) as refused:
+                    unexpected = SupervisionState.initialize(existing)
+                    unexpected.close()
+            self.assert_code(refused.exception, "state_unsafe")
+            self.assertEqual(changed, [True])
+            self.assertFalse(existing.exists())
+        finally:
+            parent.chmod(0o700)
+
     def test_concurrent_initializers_serialize_directory_creation(self):
         import json
         import subprocess
@@ -135,10 +233,10 @@ class SupervisionStateTests(unittest.TestCase):
 
             def coordinated_flock(directory, operation):
                 try:
-                    current = os.fstat(directory)
+                    os.fstat(directory)
                 except OSError:
-                    current = None
-                if current is not None and (current.st_dev, current.st_ino) == (expected.st_dev, expected.st_ino):
+                    pass
+                else:
                     (barrier / f"flocked-{worker_id}").touch()
                 return real_flock(directory, operation)
 
@@ -224,6 +322,233 @@ class SupervisionStateTests(unittest.TestCase):
         self.addCleanup(authority.close)
         self.assertEqual(authority.epoch, successes[0]["epoch"])
         self.assertEqual(authority.key.hex(), successes[0]["key"])
+
+    def test_initialize_refuses_during_rotation_gap_and_preserves_archive(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+        from unittest.mock import patch
+
+        from dotunnel.supervision_config import SupervisionError
+        from dotunnel.supervision_state import SupervisionState
+
+        old = self.open_initialized()
+
+        async def seed_old_authority():
+            async with old.lock():
+                old.set_approval("connection:project", "generation-old", True)
+
+        asyncio.run(seed_old_authority())
+        old.close()
+        owner_files = [path for path in self.base.iterdir() if path.is_file()]
+        self.assertEqual(len(owner_files), 1)
+        owner_path = owner_files[0]
+        owner_stat = owner_path.stat()
+        owner_identity = (owner_stat.st_dev, owner_stat.st_ino)
+        published = {
+            path.relative_to(self.state_dir): path.read_bytes()
+            for path in self.state_dir.rglob("*")
+            if path.is_file()
+        }
+
+        moved_old = threading.Event()
+        release_rotation = threading.Event()
+        real_rename = os.rename
+
+        def pause_after_old_to_previous(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
+            result = real_rename(
+                src,
+                dst,
+                src_dir_fd=src_dir_fd,
+                dst_dir_fd=dst_dir_fd,
+            )
+            if src == self.state_dir.name and dst == f"{self.state_dir.name}.previous":
+                moved_old.set()
+                if not release_rotation.wait(5):
+                    raise TimeoutError("rotation gap barrier was not released")
+            return result
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with patch("os.rename", pause_after_old_to_previous):
+                pending = executor.submit(SupervisionState.reinitialize, self.state_dir)
+                try:
+                    self.assertTrue(moved_old.wait(5), "rotation must reach the old-to-previous rename")
+                    sibling_path = self.base / "sibling-state"
+                    sibling = SupervisionState.initialize(sibling_path)
+                    sibling.close()
+                    sibling_owner_files = [
+                        path for path in self.base.iterdir() if path.is_file() and path != owner_path
+                    ]
+                    self.assertEqual(len(sibling_owner_files), 1)
+                    sibling_owner_path = sibling_owner_files[0]
+                    with self.assertRaises(SupervisionError) as refused:
+                        unexpected = SupervisionState.initialize(self.state_dir)
+                        unexpected.close()
+                    self.assert_code(refused.exception, "busy")
+                finally:
+                    release_rotation.set()
+                replacement = pending.result(timeout=5)
+                replacement.close()
+
+        previous = self.state_dir.with_name(self.state_dir.name + ".previous")
+        self.assertEqual(
+            {
+                path.relative_to(previous): path.read_bytes()
+                for path in previous.rglob("*")
+                if path.is_file()
+            },
+            published,
+        )
+        self.assertEqual(list(self.base.glob(".dotunnel-state-*.new")), [])
+        owner_stat = owner_path.stat()
+        self.assertEqual((owner_stat.st_dev, owner_stat.st_ino), owner_identity)
+        with self.assertRaises(SupervisionError) as still_archived:
+            SupervisionState.reinitialize(self.state_dir)
+        self.assert_code(still_archived.exception, "state_full")
+        self.assertEqual(
+            {path for path in self.base.iterdir() if path.is_file()},
+            {owner_path, sibling_owner_path},
+        )
+
+    def test_initialize_refuses_during_rollback_and_restores_old_authority(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import hashlib
+        import threading
+        from unittest.mock import patch
+
+        from dotunnel.supervision_config import SupervisionError
+        from dotunnel.supervision_state import SupervisionState
+
+        old = self.open_initialized()
+
+        async def seed_old_authority():
+            async with old.lock():
+                old.set_approval("connection:project", "generation-old", True)
+
+        asyncio.run(seed_old_authority())
+        old.close()
+        published = {
+            path.relative_to(self.state_dir): path.read_bytes()
+            for path in self.state_dir.rglob("*")
+            if path.is_file()
+        }
+
+        stage_name = (
+            ".dotunnel-state-"
+            + hashlib.sha256(os.fsencode(str(self.state_dir))).hexdigest()[:16]
+            + ".new"
+        )
+        moved_old = threading.Event()
+        release_rollback = threading.Event()
+        real_rename = os.rename
+
+        def fail_stage_promotion(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
+            if src == self.state_dir.name and dst == f"{self.state_dir.name}.previous":
+                result = real_rename(
+                    src,
+                    dst,
+                    src_dir_fd=src_dir_fd,
+                    dst_dir_fd=dst_dir_fd,
+                )
+                moved_old.set()
+                if not release_rollback.wait(5):
+                    raise TimeoutError("rollback barrier was not released")
+                return result
+            if src == stage_name and dst == self.state_dir.name:
+                raise OSError("injected stage promotion failure")
+            return real_rename(
+                src,
+                dst,
+                src_dir_fd=src_dir_fd,
+                dst_dir_fd=dst_dir_fd,
+            )
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with patch("os.rename", fail_stage_promotion):
+                pending = executor.submit(SupervisionState.reinitialize, self.state_dir)
+                try:
+                    self.assertTrue(moved_old.wait(5), "rotation must reach the old-to-previous rename")
+                    with self.assertRaises(SupervisionError) as refused:
+                        unexpected = SupervisionState.initialize(self.state_dir)
+                        unexpected.close()
+                    self.assert_code(refused.exception, "busy")
+                finally:
+                    release_rollback.set()
+
+                with self.assertRaises(SupervisionError) as failed:
+                    pending.result(timeout=5)
+                self.assert_code(failed.exception, "state_unsafe")
+
+        self.assertEqual(
+            {
+                path.relative_to(self.state_dir): path.read_bytes()
+                for path in self.state_dir.rglob("*")
+                if path.is_file()
+            },
+            published,
+        )
+        previous = self.state_dir.with_name(self.state_dir.name + ".previous")
+        self.assertFalse(previous.exists())
+        self.assertEqual(list(self.base.glob(".dotunnel-state-*.new")), [])
+
+        retry = SupervisionState.reinitialize(self.state_dir)
+        retry.close()
+        self.assertEqual(
+            {
+                path.relative_to(previous): path.read_bytes()
+                for path in previous.rglob("*")
+                if path.is_file()
+            },
+            published,
+        )
+
+    def test_reinitialization_rejects_unsafe_parent_owner_metadata(self):
+        from dotunnel.supervision_config import SupervisionError
+        from dotunnel.supervision_state import SupervisionState
+
+        mutations = {
+            "mode": lambda owner_path, state_path: owner_path.chmod(0o640),
+            "hardlink": lambda owner_path, state_path: os.link(
+                owner_path,
+                self.base / f"{state_path.name}-owner-link",
+            ),
+            "size": lambda owner_path, state_path: (
+                owner_path.write_bytes(b"unexpected owner data"),
+                owner_path.chmod(0o600),
+            ),
+            "symlink": lambda owner_path, state_path: (
+                owner_path.unlink(),
+                owner_path.symlink_to(state_path / "key"),
+            ),
+        }
+        for label, corrupt_owner in mutations.items():
+            with self.subTest(owner_metadata=label):
+                state_path = self.base / f"state-{label}"
+                before = set(self.base.iterdir())
+                state = SupervisionState.initialize(state_path)
+                state.close()
+                created = set(self.base.iterdir()) - before
+                owner_files = [path for path in created if path.is_file()]
+                self.assertEqual(len(owner_files), 1)
+                owner_path = owner_files[0]
+                published = {
+                    path.relative_to(state_path): path.read_bytes()
+                    for path in state_path.rglob("*")
+                    if path.is_file()
+                }
+
+                corrupt_owner(owner_path, state_path)
+                with self.assertRaises(SupervisionError) as refused:
+                    SupervisionState.reinitialize(state_path)
+                self.assert_code(refused.exception, "state_unsafe")
+                self.assertEqual(
+                    {
+                        path.relative_to(state_path): path.read_bytes()
+                        for path in state_path.rglob("*")
+                        if path.is_file()
+                    },
+                    published,
+                )
+                self.assertFalse(state_path.with_name(state_path.name + ".previous").exists())
 
     def test_reinitialization_refuses_an_initialization_owner_and_preserves_archive(self):
         from concurrent.futures import ThreadPoolExecutor

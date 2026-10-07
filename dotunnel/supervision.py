@@ -76,7 +76,7 @@ def _json(value: object) -> bytes:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False).encode('utf-8')
 
 
-async def _cleanup(process: asyncio.subprocess.Process) -> None:
+async def _cleanup(process: asyncio.subprocess.Process, *, close_transport: bool = True) -> None:
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
@@ -86,10 +86,11 @@ async def _cleanup(process: asyncio.subprocess.Process) -> None:
     except asyncio.TimeoutError:
         pass
     finally:
-        # Even an exited child can leave its pipes held by a detached process.
-        transport = getattr(process, '_transport', None)
-        if transport is not None:
-            transport.close()
+        if close_transport:
+            # Even an exited child can leave its pipes held by a detached process.
+            transport = getattr(process, '_transport', None)
+            if transport is not None:
+                transport.close()
 
 
 def _environment(extra_paths: Sequence[Path] = ()) -> dict[str, str]:
@@ -129,13 +130,40 @@ async def _run_cli(argv: Sequence[str], *, cwd: Path | None, deadline: float | N
             chunks.append(chunk)
     async def communicate():
         assert process.stdout is not None and process.stderr is not None
-        if input is not None:
-            assert process.stdin is not None
-            process.stdin.write(input)
-            await process.stdin.drain()
-            process.stdin.close()
-        code, stdout, stderr = await asyncio.gather(process.wait(), drain(process.stdout), drain(process.stderr))
-        return code, stdout, stderr
+        async def leader_exit():
+            # Process.wait() may remain pending until inherited pipes reach EOF.
+            while process.returncode is None:
+                await asyncio.sleep(0.01)
+            returncode = process.returncode
+            assert returncode is not None
+            return returncode
+        stdout_task = asyncio.create_task(drain(process.stdout))
+        stderr_task = asyncio.create_task(drain(process.stderr))
+        exit_task = asyncio.create_task(leader_exit())
+        tasks = (exit_task, stdout_task, stderr_task)
+        try:
+            if input is not None:
+                assert process.stdin is not None
+                process.stdin.write(input)
+                await process.stdin.drain()
+                process.stdin.close()
+            pending = set(tasks)
+            while exit_task in pending:
+                completed, _ = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                for task in completed:
+                    pending.remove(task)
+                    if task is not exit_task:
+                        task.result()
+            code = exit_task.result()
+            # Kill ordinary helpers promptly, but keep the transports open while drains consume buffered bytes.
+            await _cleanup(process, close_transport=False)
+            stdout, stderr = await asyncio.gather(stdout_task, stderr_task)
+            return code, stdout, stderr
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
     try:
         return await asyncio.wait_for(communicate(), max(0.001, deadline - time.monotonic()))
     except asyncio.TimeoutError:

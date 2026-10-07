@@ -179,8 +179,18 @@ acknowledgement and preserves the old namespace as `<state_dir>.previous`;
 reconcile that archive before requesting another rotation. Old handles,
 approvals and operation IDs do not become authority in the new namespace.
 
-Initialization and rotation share exclusive directory ownership. A concurrent
-command that finds this ownership held returns `busy` without deleting state.
+Namespace creation and rotation use a persistent empty mode `0600`,
+single-link, runtime-UID-owned `.dotunnel-owner-<64 lowercase hex digits>` file
+in the state directory's parent. Its name hashes the state basename's filesystem
+bytes; its lock remains held across both renames, rollback and final validation.
+A competing command returns `busy` without publishing another namespace.
+Do not remove or replace this file while any command may hold it. Stop commands
+using older binaries before cutover or owner-file cleanup; their root-inode lock
+alone does not cover a missing active pathname during rotation.
+A pre-created empty private state directory can still be initialized below a
+non-writable parent, using existing-root inode ownership when the owner file is
+absent. This path never creates a missing root or bypasses an existing unsafe
+owner file. Creating a namespace or rotating it requires parent write access.
 After SIGKILL, explicit reinitialization can archive one bounded, owner-only
 `.write-<32 lowercase hex digits>` staging file along with the old namespace.
 Startup still refuses that incomplete namespace; staged bytes never become
@@ -265,8 +275,10 @@ Ordinary status/inspection/input calls have a 20-second deadline, a start has a
 captured stdout and stderr are capped at 4 MiB. Status pages and screen excerpts
 are bounded as described above; these limits do not promise that an agent has
 finished or that its work is correct.
-On successful completion too, the pool cleans up ordinary helpers in its owned
-process group. Separately detached backend servers and agents are not stopped.
+On successful leader exit, even when ordinary helpers inherit stdout/stderr,
+the pool cleans up its owned process group before waiting for pipe EOF, then
+finishes bounded output drains before transport closure. Separately detached
+backend servers and agents are not stopped.
 
 `protected_paths` is an admission-time overlap guard: if a project's path,
 working directory or original repository overlaps a protected path in either
