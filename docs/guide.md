@@ -190,7 +190,7 @@ alone does not cover a missing active pathname during rotation.
 A pre-created empty private state directory can still be initialized below a
 non-writable parent, using existing-root inode ownership when the owner file is
 absent. This path never creates a missing root or bypasses an existing unsafe
-owner file. Creating a namespace or rotating it requires parent write access.
+owner file. Creating the state directory or rotating it requires parent write access.
 After SIGKILL, explicit reinitialization can archive one bounded, owner-only
 `.write-<32 lowercase hex digits>` staging file along with the old namespace.
 Startup still refuses that incomplete namespace; staged bytes never become
