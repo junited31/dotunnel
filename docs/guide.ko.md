@@ -4,7 +4,7 @@
 
 [English front page](../README.md) · [한국어](../README.ko.md) · [English guide](guide.md) · [설계](../DESIGN.md) · [config 예시](../config.example.json) · [로고 asset](../assets/dotunnel.png) · [라이선스](../LICENSE)
 
-이 안내는 설치, private Tunnel 설정, workspace 도구와 선택 native CLI 작업을 설명합니다. `dotunnel`은 로컬 stdio MCP 서버이며 호스팅 서비스, 공개 HTTP endpoint 또는 임의 코드의 sandbox가 아닙니다.
+이 안내는 설치, private Tunnel 설정, workspace 도구, 선택 native CLI 작업과 선택 Herdr/tmux agent supervision을 설명합니다. `dotunnel`은 로컬 stdio MCP 서버이며 호스팅 서비스, 공개 HTTP endpoint 또는 임의 코드의 sandbox가 아닙니다.
 
 ## 1. 설치
 
@@ -98,6 +98,8 @@ setup이 초기 workspace와 config를 만듭니다. 직접 구성할 때는 [`c
 | `run_task(name)` | 고정 작업을 시작하고 result ID를 바로 반환 |
 | `get_task_result(result_id)` | 현재 프로세스의 실행/최종 결과 조회; ID 최대 20개 보관 |
 
+Supervision은 별도 선택 API입니다. 기존 file/task 도구 일곱 개는 유지되며 supervision을 설정할 때만 공통 `agent_*` 도구 여덟 개가 추가됩니다. 설정과 안전 계약은 7절을 참고하세요.
+
 경로는 `root` 기준 상대 경로입니다. 절대 경로, `..`, symlink/hardlink, 특수 파일, 숨김 경로와 일반적인 credential/key 이름은 거부 또는 제외됩니다. 부모 디렉터리가 이미 있어야 하고 delete/move/mkdir/chmod 도구는 없습니다. 쓰기 전 hash 검사는 외부 편집과의 atomic transaction이 아니며 OS/I/O 오류 시 일부만 기록될 수 있습니다. 한 번에 한 작업만 실행하며 출력은 16 KiB까지 보관하고 나머지는 누적하지 않습니다. 작업 stdin은 닫혀 있고 최소 환경만 전달되지만 CPU, memory, disk, network 격리는 아닙니다. 새 session으로 빠져나간 자식은 process-group 정리로 종료되지 않을 수 있습니다.
 
 `run_task(name)`을 한 번 호출해 `result_id`를 보관한 뒤 제한된 간격으로 `get_task_result(result_id)`를 조회하세요. 조회는 작업을 다시 시작하지 않습니다. `exit_code`, `output`, `truncated`를 확인하세요. `completed`가 exit code 0을 뜻하지 않습니다. 실행 중 partial output은 없습니다. ID는 메모리에 최대 20개만 보관되고 서버 재시작 시 무효화됩니다. 시작 응답을 잃어도 작업을 무작정 재시도하지 마세요.
@@ -116,7 +118,154 @@ setup이 초기 workspace와 config를 만듭니다. 직접 구성할 때는 [`c
 
 native 실행 실패는 `status: failed`, `error_code: NATIVE_FAILED`와 허용된 `native_error_code`(`SANDBOX_UNAVAILABLE`, `NATIVE_UNAVAILABLE`, `TIMEOUT`, `OUTPUT_LIMIT`, `NATIVE_FAILURE`, `INVALID_NATIVE_STREAM`), 고정 `native_detail`(`AUTH_FAILED`, `RATE_LIMITED`, `PROVIDER_ERROR`, `PERMISSION_DENIED`, `UNSUCCESSFUL_RESULT`, `INVALID_RESULT`, `EMPTY_RESULT`, `SUMMARY_TOO_LARGE`, `NO_RESULT`, `INVALID_STREAM`, `EXIT_NONZERO`)만 반환하며 raw CLI log는 반환하지 않습니다. 그 밖의 실패는 `CANDIDATE_INVALID`, `SOURCE_CONFLICT`, `ARTIFACT_FAILURE`, `JOB_FAILED`, 입력 거부는 `INVALID_REQUEST`, `INVALID_CONFIG`로 구분합니다(거부 exit 2, 작업 실패 exit 1). 안전 거부를 성공으로 처리하거나 자동 재시도하지 마세요.
 
-## 7. Secret을 공개하지 않는 개발
+## 7. 선택 Herdr/tmux agent supervision
+
+trusted `dotunnel` config에 고정 `supervision` registry를 넣고 상태를 명시적으로 초기화해야 기능이 활성화됩니다. 설정한 Herdr session, tmux socket 또는 두 backend를 함께 사용할 수 있으며 connection은 최대 네 개입니다. Project는 canonical path와 허용 connection/profile을 고정하고 profile은 CLI 종류, 절대 실행 파일, 고정 인자를 지정합니다. 호출자는 cwd, 실행 파일, 인자나 환경을 전달할 수 없습니다. 이 기능은 아직 release되지 않은 source이며 기존 공개 wheel과 installer pin은 변경하지 않습니다.
+
+기본 [`config.example.json`](../config.example.json)은 의도적으로 최소 설정만 담습니다. 아래는 익명 sample 경로를 사용한 완전하고 문법적으로 유효한 config 예시입니다. 실제 trusted absolute path로 바꾸세요. Herdr와 tmux를 각각 명시적으로 설정하면 같은 `connections` 목록에서 함께 사용할 수 있습니다.
+
+```json
+{
+  "root": "/srv/example/workspace",
+  "tasks": [],
+  "supervision": {
+    "state_dir": "/srv/example/state/supervision",
+    "default_connection": "tmux-example",
+    "connections": [
+      {
+        "id": "tmux-example",
+        "backend": "tmux",
+        "executable": "/usr/bin/tmux",
+        "socket": "/srv/example/state/tmux-example.sock"
+      }
+    ],
+    "projects": [
+      {
+        "id": "example-project",
+        "path": "/srv/example/project",
+        "connections": ["tmux-example"],
+        "profiles": ["omp"]
+      }
+    ],
+    "profiles": [
+      {
+        "id": "omp",
+        "kind": "omp",
+        "executable": "/usr/local/bin/omp",
+        "args": [],
+        "backends": ["tmux"],
+        "input_mode": "bracketed-paste"
+      }
+    ],
+    "protected_paths": ["/srv/example/protected"]
+  }
+}
+```
+
+MCP 요청을 받기 전에 상태를 초기화합니다.
+
+```sh
+dotunnel supervision init --config /path/to/trusted/config.json
+dotunnel serve --config /path/to/trusted/config.json
+```
+
+`init`은 private 상태만 만들며 agent를 시작하지 않습니다. 상태 디렉터리는
+실행 UID 소유, mode `0700`이어야 하고 파일은 mode `0600`이어야 하며 writable
+MCP `root` 밖에 있어야 합니다.
+MCP 시작 시 상태를 자동 생성하거나 손상된 상태를 조용히 복구하지 않습니다.
+`dotunnel supervision reinit --config /path/to/trusted/config.json`은 자동 복구가
+아닌 명시적 authority 회전에 사용합니다. terminal 확인이 필요하며 이전
+namespace를 `<state_dir>.previous`에 보존합니다. 다음 회전 전 archive를
+정리해야 합니다. 과거 handle, 승인, operation ID는 새 namespace의 권한이 아닙니다.
+
+### 도구, scope와 선택
+
+공통 API는 정확히 여덟 도구를 등록합니다.
+
+| 도구 | 계약 |
+|---|---|
+| `agent_status(connection?, project?, cursor?)` | 읽기 전용 inventory와 recovery 진단; 페이지당 최대 100행·64 KiB, registry/scope 변경 시 cursor 무효화 |
+| `agent_read(target, lines=80)` | 최신 화면 tail을 최대 1–200행·16 KiB로 읽고 60초 유효한 signed observation 발급 |
+| `agent_approve(scope)` | `connection_id:project_id`의 현재 config generation 승인 |
+| `agent_revoke(scope)` | 해당 scope 철회; agent를 종료하거나 전달한 입력을 취소하지 않음 |
+| `agent_start(project, profile, name, operation_id, connection?, worktree_branch?)` | 등록 profile 시작; `name`은 표시 문자열이지 target identity가 아님; worktree branch는 Herdr만 지원 |
+| `agent_prompt(target, observation, text, operation_id)` | 전송 전에 handle, 현재 identity, 승인과 최신 observation 재확인; literal text 최대 8 KiB |
+| `agent_answer(target, observation, keys, operation_id)` | 명시 선택한 소문자 key 최대 8개 전달: `enter`, `esc`, `up`, `down`, `left`, `right`, `tab`, `y`, `n`, `1`–`9` |
+| `agent_wait(target, observation, timeout_seconds=60)` | 제한된 상태 변화를 기다리고 새 observation 반환; 최대 110초 |
+
+`agent_approve`와 `agent_revoke` scope는 정확히 `connection_id:project_id`이며
+현재 config generation에 묶입니다. 이는 운영 실수를 막는 승인이지 사람 인증이
+아닙니다. stdio MCP에는 별도 caller identity가 없으므로 stdio 프로세스와 Tunnel
+접근을 제한하세요. Scope 변경은 기존 승인과 handle을 무효화하지만 이미 발생한
+효과를 되돌리지는 않습니다.
+
+Target은 signed opaque handle이며 display name, pane ID 또는 caller 입력 이름을
+대신 사용할 수 없습니다. Recovery identity와 미해결 start 기록은 진단용이며
+실행 가능한 target이 아닙니다. 기본 connection은 새 start만 선택하고 scope
+승인, 모호한 기존 target 선택, agent 재시작, broadcast 또는 자동 fallback을
+하지 않습니다. 기존 target은 handle로 명시 선택하며 이름으로 입양하지 않습니다.
+
+Herdr가 제공하는 native process identity는 약할 수 있으므로 supervisor 재시작이나
+connection 실패 뒤 다시 탐색해야 할 수 있습니다. tmux는 더 강한 managed identity
+evidence를 사용합니다. 쓰기는 dotunnel이 고정 profile로 시작해 boot/server/pane/
+process identity를 기록하고 재확인한 agent만 허용합니다. 임의의 기존 pane은 입력
+대상으로 입양하지 않습니다. 기존 pane은 정확한 `read_targets` identity를 등록해
+읽기 전용으로 관찰할 수 있습니다. 이 증거와 반복 검사도 입력 전달의 원자성이나
+sandbox를 보장하지 않습니다. backend 상태, 화면 변화와 입력 확인은 논리적 작업
+성공을 입증하지 않으며 tmux agent 상태가 `unknown`인 것은 정상일 수 있습니다.
+
+tmux connection의 `read_targets`에 현재 서버·pane의 정확한 identity를 등록합니다.
+PID·시작 시각은 십진 문자열입니다. 예시 값을 해당 `/proc` 증거로 바꾸세요.
+Process가 교체되면 등록이 무효화되며 어떤 승인도 입력 권한을 만들지 않습니다.
+
+```json
+"read_targets": [{
+  "project": "example-project", "native_id": "%3",
+  "identity": {
+    "boot_id": "00000000-0000-4000-8000-000000000000",
+    "server_pid": "12345", "server_start": "100000",
+    "pane_pid": "12346", "pane_start": "100001"
+  }
+}]
+```
+
+화면 observation과 native output에는 secret이 포함될 수 있으며 ANSI 정리는
+redaction이 아닙니다.
+
+### Durable operation과 실행 제한
+
+각 start, prompt, answer에는 고유 `operation_id`가 필요합니다. Persistent receipt는
+ID와 canonical request를 결합합니다. 같은 ID와 같은 payload를 다시 요청하면 native
+효과를 재실행하지 않고 기록된 결과만 반환하며, 다른 내용의 ID 재사용은 conflict가
+됩니다. `unknown` 시작/전달은 이미 효과가 있었을 수 있습니다. receipt와 recovery
+진단을 살펴보고 target을 확인하기 전에는 같은 ID나 새 ID로 무작정 재시도하지
+마세요. Recovery 기록은 handle이 아닙니다. Receipt와 target 기록은 각각 최대
+1,000개, 각 64 KiB이며 자동 정리되지 않습니다.
+
+`agent_revoke`의 `busy` 거절은 철회 완료가 아닙니다. 진행 중 mutation이 끝난 뒤
+명시적으로 다시 철회하고 상태를 확인하세요.
+
+공유 native CLI pool은 동시에 최대 네 process를 실행합니다. 일반 status/조회/입력
+호출은 20초, start 전체는 180초 deadline을 사용하며 `agent_wait`는 최대 110초입니다.
+stdout/stderr 합산 캡처는 4 MiB로 제한됩니다. status와 화면도 앞서 설명한 크기로
+제한되며 이 한도는 agent 완료나 작업 정확성을 보장하지 않습니다.
+
+`protected_paths`는 admission 시 경로 겹침을 확인합니다. project, working
+directory 또는 original repository가 양방향으로 보호 경로와 겹치면 mutation을
+거부하고 관찰만 허용합니다. 실행 중인 process의 파일 접근을 제한하거나
+filesystem confinement을 제공하지 않으며 sandbox가 아닙니다. Native agent는
+실행 계정의 권한, 도구, 네트워크 접근을 그대로 가집니다.
+Native agent의 승인 정책은 별도로 유지됩니다. OMP 쓰기 승인 smoke는
+`--approval-mode=always-ask`와 owner-only YAML의 `tools.approval.write: prompt`를
+사용하세요. `--approval-mode=write`는 해당 등급을 허용하지 승인 UI를 요구하지
+않습니다. 화면을 읽고 사용자가 명시적으로 선택한 응답만 전달하세요. Herdr prompt
+문자열은 제출 중 같은 host의 process argv에 보일 수 있으므로 credential을 보내지 마세요.
+
+독립 [`dotunnel-adapter-runner`](../adapter_runner/README.md)는 별도 계약이며 기본
+도구 일곱 개만 사용합니다. 이 runner에는 Herdr·Orca·tmux·provider adapter가
+포함되지 않으며 Orca는 core supervision에도 포함되지 않습니다.
+
+## 8. Secret을 공개하지 않는 개발
 
 source checkout을 private runtime 설정·key·쓰기 가능한 workspace와 분리하세요. `.gitignore`는 실수로 stage하는 것을 줄일 뿐 이미 tracked인 파일이나 `git add -f`를 막지 않습니다. private 저장소에도 유출 방지가 필요합니다.
 
@@ -138,7 +287,7 @@ push 전 `git diff --cached`를 로컬에서 검토하고 runtime/key 파일이 
 
 미공개 기능은 별도 **private 저장소**를 만들고 public source를 clone한 뒤 private remote에 push해 개발하세요. public GitHub fork는 public이며 독립적으로 private으로 바꿀 수 없습니다([GitHub fork visibility](https://docs.github.com/en/pull-requests/reference/forks)). public upstream은 fetch용으로 두고 검토한 코드 변경만 공개하세요. private runtime 파일·운영 기록은 보내지 않습니다. 별도 private 개발 저장소는 선택 사항이며 실행 필수 요소가 아닙니다.
 
-## 8. 유지보수자 draft 릴리스
+## 9. 유지보수자 draft 릴리스
 
 source 변경은 feature branch와 PR로 반영합니다. public `main`은 GitHub Actions의 `Secret scan`, `Python 3.11`, `Python 3.13` 성공과 최신 base, 리뷰 대화 해결을 요구하며 관리자에게도 적용됩니다. main 직접 push·force-push·브랜치 삭제는 금지합니다.
 

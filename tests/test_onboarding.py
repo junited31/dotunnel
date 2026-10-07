@@ -73,9 +73,40 @@ class OnboardingTests(unittest.TestCase):
             "cwd": ".",
             "timeout_seconds": 90,
         })
+        from dotunnel.config import load_config
+        from dotunnel.supervision_state import SupervisionState
+        state = self.base / "supervision-state"
+        executable = str(self._file(self.base / "herdr", executable=True))
+        config["supervision"] = {
+            "state_dir": str(state),
+            "connections": [{"id": "isolated", "backend": "herdr", "executable": executable, "session": "fixture"}],
+            "projects": [{"id": "supervised", "path": str(self.source), "connections": ["isolated"], "profiles": ["codex"]}],
+            "profiles": [{"id": "codex", "kind": "codex", "executable": executable, "backends": ["herdr"]}],
+        }
+        initialized = SupervisionState.initialize(state)
+        self.supervision_epoch = initialized.epoch
+        initialized.close()
         config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
         config_path.chmod(0o600)
+        loaded = load_config(config_path)
+        authority = SupervisionState(state)
+        try:
+            authority.set_approval("isolated:supervised", loaded.supervision.generation, True)
+        finally:
+            authority.close()
         return config
+
+    def _assert_supervision_authority_preserved(self, config_path):
+        from dotunnel.config import load_config
+        from dotunnel.supervision_state import SupervisionState
+        settings = load_config(config_path).supervision
+        self.assertIsNotNone(settings)
+        authority = SupervisionState(settings.state_dir)
+        try:
+            self.assertEqual(authority.epoch, self.supervision_epoch)
+            self.assertTrue(authority.approved("isolated:supervised", settings.generation))
+        finally:
+            authority.close()
 
     def test_discovery_finds_only_safe_installed_launchers_without_running_them(self):
         bin_dir = self.base / "bin"
@@ -350,6 +381,8 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(initial_states, [set(), {"codex"}])
         final = json.loads(config_path.read_text(encoding="utf-8"))
         self.assertEqual(final["root"], original["root"])
+        self.assertEqual(final["supervision"], original["supervision"])
+        self._assert_supervision_authority_preserved(config_path)
         self.assertEqual([task["name"] for task in final["tasks"]], ["existing_review", "dotunnel-claude"])
         self.assertEqual(self._file_identity(self.directory / "profile.yaml"), profile_before)
         key_after = (self.directory / "runtime-api-key").stat(follow_symlinks=False)

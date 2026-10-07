@@ -9,6 +9,7 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 
+from .supervision_config import SupervisionSettings, parse_supervision
 from .tasks import TaskSpec
 
 
@@ -16,6 +17,7 @@ from .tasks import TaskSpec
 class Config:
     root: Path
     tasks: list[TaskSpec]
+    supervision: SupervisionSettings | None = None
 
 
 def _open_absolute(path: Path, flags: int) -> int:
@@ -72,7 +74,7 @@ def load_config(path: Path | str) -> Config:
             raise ValueError("Configuration must be valid UTF-8 JSON") from None
     finally:
         os.close(fd)
-    data = _keys(data, {"root", "tasks"})
+    data = _keys(data, {"root", "tasks"}, {"supervision"})
     if not isinstance(data["root"], str) or not data["root"] or "\x00" in data["root"]:
         raise ValueError("Invalid workspace root")
     root = Path(data["root"])
@@ -109,4 +111,5 @@ def load_config(path: Path | str) -> Config:
             raise ValueError("Task timeout must be finite and within (0, 300] seconds")
         names.add(name)
         specs.append(TaskSpec(name=name, description=description, argv=tuple(argv), cwd=directory, timeout_seconds=float(timeout)))
-    return Config(root=root, tasks=specs)
+    supervision = parse_supervision(data["supervision"], root, path) if "supervision" in data else None
+    return Config(root=root, tasks=specs, supervision=supervision)
