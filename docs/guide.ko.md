@@ -178,6 +178,24 @@ MCP 시작 시 상태를 자동 생성하거나 손상된 상태를 조용히 �
 namespace를 `<state_dir>.previous`에 보존합니다. 다음 회전 전 archive를
 정리해야 합니다. 과거 handle, 승인, operation ID는 새 namespace의 권한이 아닙니다.
 
+namespace 생성과 회전은 상태 디렉터리의 부모에 보존되는
+`.dotunnel-owner-<소문자 hex 64자리>` 파일을 사용합니다. 상태 basename의
+filesystem 바이트를 SHA-256으로 해시한 이름이며, 내용이 비어 있고 runtime UID
+소유·`0600`·단일 hard link인 파일만 허용합니다. 잠금은 두 번의 rename, rollback,
+최종 검증이 끝날 때까지 유지됩니다. 경합 명령은 새 namespace를 만들지 않고
+`busy`를 반환합니다. 명령이 잠금을 보유할 수 있는 동안 파일을 삭제하거나
+교체하지 마세요. cutover나 owner 파일 정리 전에는 이전 binary의 명령도
+중지해야 합니다. 이전 root-inode 잠금만으로는 회전 중 active 경로가 없는
+구간을 보호하지 못합니다.
+쓰기 불가능한 부모 아래에 미리 만든 빈 private 상태 디렉터리는 owner 파일이
+없으면 기존 root inode의 소유 잠금으로 초기화할 수 있습니다. 이 경로는 없는
+root를 새로 만들거나 기존의 안전하지 않은 owner 파일을 우회하지 않습니다.
+상태 디렉터리를 새로 만들거나 회전하려면 부모 디렉터리에 쓰기 권한이 필요합니다.
+SIGKILL 뒤에는 명시적 재초기화가 크기·소유자·권한 검증을 통과한 atomic staging
+파일 `.write-<소문자 hex 32자리>` 하나를 이전 namespace와 함께 보존할 수 있습니다.
+시작 시에는 여전히 불완전한 namespace를 거부하며 staging 바이트를 승인이나
+receipt로 승격하지 않습니다. 잘못되거나 안전하지 않은 staging 파일은 거부합니다.
+
 ### 도구, scope와 선택
 
 공통 API는 정확히 여덟 도구를 등록합니다.
@@ -249,12 +267,18 @@ ID와 canonical request를 결합합니다. 같은 ID와 같은 payload를 다�
 호출은 20초, start 전체는 180초 deadline을 사용하며 `agent_wait`는 최대 110초입니다.
 stdout/stderr 합산 캡처는 4 MiB로 제한됩니다. status와 화면도 앞서 설명한 크기로
 제한되며 이 한도는 agent 완료나 작업 정확성을 보장하지 않습니다.
+정상 leader 종료 시 일반 helper가 stdout/stderr를 상속했더라도, pool은 pipe EOF를
+기다리기 전에 자신이 소유한 process group을 정리하고 출력 drain을 끝낸 뒤
+transport를 닫습니다. 별도 process group의 backend 서버와 agent는 중지하지 않습니다.
 
 `protected_paths`는 admission 시 경로 겹침을 확인합니다. project, working
 directory 또는 original repository가 양방향으로 보호 경로와 겹치면 mutation을
 거부하고 관찰만 허용합니다. 실행 중인 process의 파일 접근을 제한하거나
 filesystem confinement을 제공하지 않으며 sandbox가 아닙니다. Native agent는
 실행 계정의 권한, 도구, 네트워크 접근을 그대로 가집니다.
+tmux의 working directory는 설정된 project 경로가 아닌 검증된 process의 실제
+canonical cwd입니다. 조회·입력 전에 다시 확인하며, cwd를 확인할 수 없으면
+대상을 숨기고 후속 상호작용을 거부합니다.
 Native agent의 승인 정책은 별도로 유지됩니다. OMP 쓰기 승인 smoke는
 `--approval-mode=always-ask`와 owner-only YAML의 `tools.approval.write: prompt`를
 사용하세요. `--approval-mode=write`는 해당 등급을 허용하지 승인 UI를 요구하지

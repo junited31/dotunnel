@@ -375,6 +375,103 @@ class SupervisionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_success_reaps_ordinary_helpers_inheriting_pipes_but_preserves_detached_backend(self):
+        import signal
+        with tempfile.TemporaryDirectory() as temporary:
+            pid_file = Path(temporary) / 'pids'
+            pids = []
+
+            def live(pid):
+                try:
+                    return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] not in ('Z', 'X', 'x')
+                except FileNotFoundError:
+                    return False
+
+            command = (
+                "import os,pathlib,subprocess,sys\n"
+                "pathlib.Path(sys.argv[1]).write_text(f'{os.getpid()}\\n')\n"
+                "ordinary=subprocess.Popen(['/usr/bin/sleep','30'])\n"
+                "with open(sys.argv[1], 'a') as record: record.write(f'{ordinary.pid}\\n')\n"
+                "detached=subprocess.Popen(['/usr/bin/sleep','30'],start_new_session=True,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+                "with open(sys.argv[1], 'a') as record: record.write(f'{detached.pid}\\n')\n"
+                "sys.stdout.buffer.write(b'o' * (512 * 1024) + b'leader-stdout-tail')\n"
+                "sys.stdout.flush()\n"
+                "sys.stderr.buffer.write(b'e' * (512 * 1024) + b'leader-stderr-tail')\n"
+                "sys.stderr.flush()\n"
+            )
+            try:
+                code, output, error = await run_cli([sys.executable, '-I', '-c', command, str(pid_file)], deadline=time.monotonic() + 5)
+                leader, ordinary, detached = map(int, pid_file.read_text().split())
+                pids.extend((leader, ordinary, detached))
+                stdout = b'o' * (512 * 1024) + b'leader-stdout-tail'
+                stderr = b'e' * (512 * 1024) + b'leader-stderr-tail'
+                self.assertEqual((code, output, error), (0, stdout, stderr))
+                self.assertNotEqual(os.getpgid(detached), leader)
+                end = time.monotonic() + 1
+                while live(ordinary) and time.monotonic() < end:
+                    await asyncio.sleep(.01)
+                self.assertFalse(live(ordinary), 'ordinary request helper survived successful completion')
+                self.assertTrue(live(detached), 'detached backend lifetime must not be ended by request cleanup')
+            finally:
+                if pid_file.exists():
+                    pids.extend(map(int, pid_file.read_text().split()))
+                for pid in set(pids):
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
+    async def test_cancellation_reaps_ordinary_helpers_inheriting_pipes(self):
+        import signal
+        with tempfile.TemporaryDirectory() as temporary:
+            pid_file = Path(temporary) / 'pids'
+            pids = []
+
+            def live(pid):
+                try:
+                    return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] not in ('Z', 'X', 'x')
+                except FileNotFoundError:
+                    return False
+
+            command = (
+                "import os,pathlib,subprocess,sys,time\n"
+                "helper=subprocess.Popen(['/usr/bin/sleep','30'])\n"
+                "pid_file=pathlib.Path(sys.argv[1])\n"
+                "pending=pid_file.with_suffix('.pending')\n"
+                "pending.write_text(f'{os.getpid()} {helper.pid}')\n"
+                "pending.replace(pid_file)\n"
+                "time.sleep(30)\n"
+            )
+            task = asyncio.create_task(run_cli([sys.executable, '-I', '-c', command, str(pid_file)], deadline=time.monotonic() + 5))
+            try:
+                end = time.monotonic() + 2
+                while not pid_file.exists():
+                    if task.done():
+                        await task
+                    if time.monotonic() >= end:
+                        self.fail('the CLI leader did not record its inherited-pipe helper')
+                    await asyncio.sleep(.01)
+                pids.extend(map(int, pid_file.read_text().split()))
+                helper = pids[-1]
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                end = time.monotonic() + 1
+                while live(helper) and time.monotonic() < end:
+                    await asyncio.sleep(.01)
+                self.assertFalse(live(helper), 'ordinary helper survived cancellation cleanup')
+            finally:
+                if not task.done():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                if pid_file.exists():
+                    pids.extend(map(int, pid_file.read_text().split()))
+                for pid in set(pids):
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
     async def test_bounded_output_does_not_wait_for_unbounded_child(self):
         with self.assertRaises(SupervisionError):
             await run_cli([sys.executable, '-c', "import sys;sys.stdout.buffer.write(b'x'*5000000)"], deadline=time.monotonic()+5)

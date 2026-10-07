@@ -23,6 +23,7 @@ _MAX_AUDIT = 1_048_576
 _AUDIT_NAMES = ("audit.current", "audit.previous")
 _ID = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
+_STAGING = re.compile(r"\.write-[0-9a-f]{32}\Z")
 _TARGET_ID = re.compile(r"[0-9a-f]{32}\Z")
 _GENERATION = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 _SCOPE = re.compile(r"[A-Za-z0-9_-]{1,64}:[A-Za-z0-9_-]{1,64}\Z")
@@ -225,6 +226,81 @@ def _check_regular(info: os.stat_result, *, maximum: int) -> None:
         raise _unsafe()
 
 
+def _owner_lock_name(state_name: str) -> str:
+    return ".dotunnel-owner-" + hashlib.sha256(os.fsencode(state_name)).hexdigest()
+
+
+def _verify_owner_lock(parent_fd: int, name: str, owner_fd: int) -> None:
+    opened = os.fstat(owner_fd)
+    _check_regular(opened, maximum=0)
+    try:
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError:
+        raise _unsafe() from None
+    _check_regular(current, maximum=0)
+    if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+        raise _unsafe()
+
+
+def _acquire_owner_lock(parent_fd: int, state_name: str, *, allow_existing_only: bool = False) -> tuple[int, str]:
+    name = _owner_lock_name(state_name)
+    owner_fd = -1
+    created = False
+    try:
+        try:
+            owner_fd = os.open(
+                name,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                0o600,
+                dir_fd=parent_fd,
+            )
+            created = True
+        except FileExistsError:
+            owner_fd = os.open(
+                name,
+                os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                dir_fd=parent_fd,
+            )
+        except PermissionError:
+            if not allow_existing_only:
+                raise
+            # A pre-created private root may live below a non-writable parent.
+            # Never bypass an existing guard; no guard means no root creation.
+            try:
+                os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return -1, name
+            raise _unsafe()
+        if created:
+            os.fchmod(owner_fd, 0o600)
+        _verify_owner_lock(parent_fd, name, owner_fd)
+        try:
+            fcntl.flock(owner_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise SupervisionError("busy") from None
+        if created:
+            os.fsync(owner_fd)
+            os.fsync(parent_fd)
+        _verify_owner_lock(parent_fd, name, owner_fd)
+        return owner_fd, name
+    except BaseException as error:
+        if owner_fd >= 0:
+            os.close(owner_fd)
+        if isinstance(error, SupervisionError):
+            raise
+        if isinstance(error, OSError):
+            raise _unsafe() from None
+        raise
+
+
+def _release_owner_lock(owner_fd: int) -> None:
+    try:
+        fcntl.flock(owner_fd, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    os.close(owner_fd)
+
+
 def _read_file(directory_fd: int, name: str, *, maximum: int, required: bool = True) -> bytes | None:
     try:
         fd = os.open(
@@ -262,17 +338,36 @@ def _read_file(directory_fd: int, name: str, *, maximum: int, required: bool = T
     finally:
         os.close(fd)
 
+def _list_names_bounded(directory_fd: int, *, maximum: int) -> list[str]:
+    names: list[str] = []
+    try:
+        with os.scandir(directory_fd) as entries:
+            for entry in entries:
+                names.append(entry.name)
+                if len(names) > maximum:
+                    raise _unsafe()
+    except OSError:
+        raise _unsafe() from None
+    return names
+
+
 def _validate_archivable_namespace(root_fd: int) -> None:
-    names = set(os.listdir(root_fd))
     required = {"lock", *_CATEGORIES}
     allowed = required | {"epoch.json", "key", *_AUDIT_NAMES}
-    if not required <= names or names - allowed:
+    names = set(_list_names_bounded(root_fd, maximum=len(allowed) + 1))
+    if not required <= names or any(name not in allowed and not _STAGING.fullmatch(name) for name in names):
         raise _unsafe()
+    staged = [name for name in names if _STAGING.fullmatch(name)]
+    if len(staged) > 1:
+        raise _unsafe()
+    staged_total = len(staged)
     _read_file(root_fd, "lock", maximum=_MAX_RECORD)
     for name in ("epoch.json", "key"):
         _read_file(root_fd, name, maximum=_MAX_RECORD, required=False)
     for name in _AUDIT_NAMES:
         _read_file(root_fd, name, maximum=_MAX_AUDIT, required=False)
+    for name in staged:
+        _read_file(root_fd, name, maximum=_MAX_RECORD)
     for category in _CATEGORIES:
         try:
             directory_fd = os.open(
@@ -286,15 +381,31 @@ def _validate_archivable_namespace(root_fd: int) -> None:
             info = os.fstat(directory_fd)
             if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
                 raise _unsafe()
-            entries = os.listdir(directory_fd)
-            if len(entries) > _MAX_RECORDS:
-                raise _unsafe()
+            entries = _list_names_bounded(directory_fd, maximum=_MAX_RECORDS + 1)
+            published_count = 0
+            category_staged_count = 0
             for entry in entries:
-                if not entry.endswith(".json") or not _HASH.fullmatch(entry[:-5]):
+                if entry.endswith(".json") and _HASH.fullmatch(entry[:-5]):
+                    published_count += 1
+                    if published_count > _MAX_RECORDS:
+                        raise _unsafe()
+                    _read_file(directory_fd, entry, maximum=_MAX_RECORD)
+                elif _STAGING.fullmatch(entry):
+                    category_staged_count += 1
+                    if category_staged_count > 1:
+                        raise _unsafe()
+                    _read_file(directory_fd, entry, maximum=_MAX_RECORD)
+                else:
                     raise _unsafe()
-                _read_file(directory_fd, entry, maximum=_MAX_RECORD)
+            staged_total += category_staged_count
+            if staged_total > 1:
+                raise _unsafe()
         finally:
             os.close(directory_fd)
+
+
+
+
 
 
 
@@ -433,10 +544,50 @@ class SupervisionState:
     @classmethod
     def initialize(cls, path: Path | str) -> "SupervisionState":
         state_path = _absolute(path)
-        parent_fd, name = _parent_and_name(state_path, create_missing=True)
+        parent_fd = -1
+        owner_fd = -1
+        try:
+            parent_fd, name = _parent_and_name(state_path, create_missing=True)
+            owner_fd, owner_name = _acquire_owner_lock(parent_fd, name, allow_existing_only=True)
+            return cls._initialize_owned(state_path, parent_fd, name, owner_fd, owner_name)
+        finally:
+            if owner_fd >= 0:
+                _release_owner_lock(owner_fd)
+            if parent_fd >= 0:
+                os.close(parent_fd)
+
+    @classmethod
+    def _initialize_owned(
+        cls,
+        state_path: Path,
+        parent_fd: int,
+        name: str,
+        owner_fd: int,
+        owner_name: str,
+    ) -> "SupervisionState":
+        """Initialize existing roots under inode ownership; new roots require a stable owner."""
         created = False
         owns_empty_directory = False
         root_fd = -1
+        initialized_state: SupervisionState | None = None
+
+        def verify_path() -> None:
+            if owner_fd >= 0:
+                _verify_owner_lock(parent_fd, owner_name, owner_fd)
+            opened = os.fstat(root_fd)
+            visible_parent_fd = _open_directory(state_path.parent, private_final=False)
+            try:
+                parent_info = os.fstat(parent_fd)
+                visible_parent = os.fstat(visible_parent_fd)
+                if (parent_info.st_dev, parent_info.st_ino) != (visible_parent.st_dev, visible_parent.st_ino):
+                    raise _unsafe()
+                current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                _directory_info(current, final=True)
+                if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+                    raise _unsafe()
+            finally:
+                os.close(visible_parent_fd)
+
         try:
             try:
                 root_fd = os.open(
@@ -445,6 +596,8 @@ class SupervisionState:
                     dir_fd=parent_fd,
                 )
             except FileNotFoundError:
+                if owner_fd < 0:
+                    raise _unsafe()
                 try:
                     os.mkdir(name, 0o700, dir_fd=parent_fd)
                     created = True
@@ -457,13 +610,15 @@ class SupervisionState:
                     raise _unsafe() from None
             except OSError:
                 raise _unsafe() from None
-            info = os.fstat(root_fd)
-            if info.st_uid != os.getuid():
-                raise _unsafe()
             if created:
                 os.fchmod(root_fd, 0o700)
-            elif stat.S_IMODE(info.st_mode) != 0o700:
-                raise _unsafe()
+            _directory_info(os.fstat(root_fd), final=True)
+            verify_path()
+            try:
+                fcntl.flock(root_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise SupervisionError("busy") from None
+            verify_path()
             if os.listdir(root_fd):
                 raise SupervisionError("state_unsafe", reason="state_already_initialized")
             owns_empty_directory = True
@@ -490,8 +645,18 @@ class SupervisionState:
                 os.fsync(lock_fd)
             finally:
                 os.close(lock_fd)
+            verify_path()
             os.fsync(root_fd)
+            verify_path()
+            initialized_state = cls(state_path)
+            opened = os.fstat(root_fd)
+            returned = os.fstat(initialized_state._dir_fd)
+            if (opened.st_dev, opened.st_ino) != (returned.st_dev, returned.st_ino):
+                raise _unsafe()
+            verify_path()
         except BaseException as error:
+            if initialized_state is not None:
+                initialized_state.close()
             if owns_empty_directory and root_fd >= 0:
                 for category in _CATEGORIES:
                     try:
@@ -523,31 +688,34 @@ class SupervisionState:
                 except OSError:
                     pass
                 if created:
-                    os.close(root_fd)
-                    root_fd = -1
                     try:
+                        verify_path()
                         os.rmdir(name, dir_fd=parent_fd)
-                    except OSError:
+                        os.fsync(parent_fd)
+                    except (OSError, SupervisionError):
                         pass
             if root_fd >= 0:
                 os.close(root_fd)
-            os.close(parent_fd)
             if isinstance(error, SupervisionError):
                 raise
             if isinstance(error, OSError):
                 raise _unsafe() from None
             raise
         os.close(root_fd)
-        os.close(parent_fd)
-        return cls(state_path)
+        assert initialized_state is not None
+        return initialized_state
 
     @classmethod
     def reinitialize(cls, path: Path | str) -> "SupervisionState":
         state_path = _absolute(path)
         lock_fd = -1
+        owner_fd = -1
+        owner_name = ""
         parent_fd = -1
         root_fd = -1
         staging_path: Path | None = None
+        staged: SupervisionState | None = None
+        returned: SupervisionState | None = None
         staging_ready = False
         reservation_created = False
         reservation_inode: tuple[int, int] | None = None
@@ -555,11 +723,17 @@ class SupervisionState:
         moved_new = False
         try:
             parent_fd, name = _parent_and_name(state_path)
+            owner_fd, owner_name = _acquire_owner_lock(parent_fd, name)
             root_fd = _open_directory(state_path)
+            # The inode flock remains a defense after stable state ownership.
+            try:
+                fcntl.flock(root_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise SupervisionError("busy") from None
 
             def verify_path() -> None:
+                _verify_owner_lock(parent_fd, owner_name, owner_fd)
                 opened = os.fstat(root_fd)
-                _directory_info(opened, final=True)
                 visible_parent_fd = _open_directory(state_path.parent, private_final=False)
                 try:
                     parent_info = os.fstat(parent_fd)
@@ -581,6 +755,7 @@ class SupervisionState:
                     os.close(visible_parent_fd)
 
             def verify_lock_path() -> None:
+                _verify_owner_lock(parent_fd, owner_name, owner_fd)
                 opened = os.fstat(lock_fd)
                 current = os.stat("lock", dir_fd=root_fd, follow_symlinks=False)
                 _check_regular(current, maximum=_MAX_RECORD)
@@ -625,10 +800,11 @@ class SupervisionState:
                 raise SupervisionError("state_full", reason="staging_namespace_requires_reconciliation")
 
             staging_path = state_path.with_name(stage_name)
-            staged = cls.initialize(staging_path)
-            staged.close()
+            staged = cls._initialize_owned(staging_path, parent_fd, stage_name, owner_fd, owner_name)
             staging_ready = True
+            _verify_owner_lock(parent_fd, owner_name, owner_fd)
             os.fsync(parent_fd)
+            _verify_owner_lock(parent_fd, owner_name, owner_fd)
 
             try:
                 os.mkdir(previous_name, 0o700, dir_fd=parent_fd)
@@ -665,24 +841,46 @@ class SupervisionState:
             os.rename(name, previous_name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
             moved_old = True
             reservation_created = False
+            _verify_owner_lock(parent_fd, owner_name, owner_fd)
             os.fsync(parent_fd)
+            _verify_owner_lock(parent_fd, owner_name, owner_fd)
+            archived = os.stat(previous_name, dir_fd=parent_fd, follow_symlinks=False)
+            opened = os.fstat(root_fd)
+            if (archived.st_dev, archived.st_ino) != (opened.st_dev, opened.st_ino):
+                raise _unsafe()
             os.rename(stage_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
             moved_new = True
             staging_ready = False
+            _verify_owner_lock(parent_fd, owner_name, owner_fd)
             os.fsync(parent_fd)
+            _verify_owner_lock(parent_fd, owner_name, owner_fd)
+            returned = cls(state_path)
+            assert staged is not None
+            staged_info = os.fstat(staged._dir_fd)
+            returned_info = os.fstat(returned._dir_fd)
+            if (staged_info.st_dev, staged_info.st_ino) != (returned_info.st_dev, returned_info.st_ino):
+                raise _unsafe()
+            _verify_owner_lock(parent_fd, owner_name, owner_fd)
+            returned._verify_path()
+            _verify_owner_lock(parent_fd, owner_name, owner_fd)
         except BaseException as error:
+            if returned is not None:
+                returned.close()
+                returned = None
             if parent_fd >= 0 and root_fd >= 0 and moved_old and not moved_new:
                 try:
                     try:
                         os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
                     except FileNotFoundError:
+                        _verify_owner_lock(parent_fd, owner_name, owner_fd)
                         archived = os.stat(name + ".previous", dir_fd=parent_fd, follow_symlinks=False)
                         opened = os.fstat(root_fd)
                         if (archived.st_dev, archived.st_ino) == (opened.st_dev, opened.st_ino):
                             os.rename(name + ".previous", name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
                             os.fsync(parent_fd)
+                            _verify_owner_lock(parent_fd, owner_name, owner_fd)
                             moved_old = False
-                except OSError:
+                except (OSError, SupervisionError):
                     pass
             if parent_fd >= 0 and reservation_created and reservation_inode is not None:
                 try:
@@ -701,6 +899,8 @@ class SupervisionState:
                 raise _unsafe() from None
             raise
         finally:
+            if staged is not None:
+                staged.close()
             if lock_fd >= 0:
                 try:
                     fcntl.flock(lock_fd, fcntl.LOCK_UN)
@@ -709,9 +909,12 @@ class SupervisionState:
                 os.close(lock_fd)
             if root_fd >= 0:
                 os.close(root_fd)
+            if owner_fd >= 0:
+                _release_owner_lock(owner_fd)
             if parent_fd >= 0:
                 os.close(parent_fd)
-        return cls(state_path)
+        assert returned is not None
+        return returned
 
     @property
     def epoch(self) -> str:

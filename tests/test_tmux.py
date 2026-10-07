@@ -488,6 +488,212 @@ class TmuxBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(target["native_id"], native["native_id"])
         self.assertEqual(target["process_state"], "running")
 
+    async def test_env_s_shebang_preserves_quoted_arguments_in_running_process(self):
+        executable = self.root / "agent with env shebang"
+        executable.write_text(
+            f"#!/usr/bin/env -S {sys.executable} -W 'ignore:hello world'\n{_AGENT}",
+            encoding="utf-8",
+        )
+        executable.chmod(0o700)
+        self.first.profile = Profile(
+            id="omp",
+            kind="omp",
+            executable=executable,
+            args=(),
+            backends=("tmux",),
+            input_mode="bracketed-paste",
+        )
+
+        started = await self.first.backend.start(
+            self.first.project,
+            self.first.profile,
+            "quoted-env-arguments",
+            None,
+            {"target_id": "env-s", "nonce": "nonce-env-s"},
+            deadline=time.monotonic() + 10,
+        )
+
+        process_argv = _proc_cmdline(started["identity"]["pane_pid"])
+        self.assertEqual(
+            process_argv,
+            [sys.executable, "-W", "ignore:hello world", str(executable)],
+        )
+        self.assertEqual(started["command_argv"], process_argv)
+
+    async def test_inventory_and_read_report_live_cwd_without_changing_record_binding(self):
+        protected_path = self.root / "protected"
+        protected_path.mkdir()
+        agent_script = self.root / "agent_changes_cwd.py"
+        agent_script.write_text(
+            "import os, sys, time\n"
+            "os.chdir(sys.argv[1])\n"
+            "while True:\n"
+            "    time.sleep(1)\n",
+            encoding="utf-8",
+        )
+        self.first.profile = Profile(
+            id="omp",
+            kind="omp",
+            executable=Path(sys.executable),
+            args=(str(agent_script), str(protected_path)),
+            backends=("tmux",),
+            input_mode="bracketed-paste",
+        )
+        nonce = "nonce-chdir"
+        started = await self.first.backend.start(
+            self.first.project,
+            self.first.profile,
+            "changes-cwd",
+            None,
+            {"target_id": "chdir", "nonce": nonce},
+            deadline=time.monotonic() + 10,
+        )
+        native = started["identity"]
+        expected_cwd = str(protected_path.resolve())
+        for _ in range(200):
+            try:
+                actual_cwd = Path(f"/proc/{native['pane_pid']}/cwd").resolve(strict=True)
+            except OSError:
+                actual_cwd = None
+            if actual_cwd == Path(expected_cwd):
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(actual_cwd, Path(expected_cwd))
+
+        record = {
+            "target_id": "chdir",
+            "nonce": nonce,
+            "state": "active",
+            "binding": {
+                "connection": self.first.connection.id,
+                "project": self.first.project.id,
+                "profile": self.first.profile.id,
+            },
+            "native": dict(started, cwd=expected_cwd),
+        }
+        self.assertEqual(record["binding"]["project"], self.first.project.id)
+        reopened = TmuxBackend(self.first.connection, self.first.runner)
+        rows = await reopened.inventory(
+            [self.first.project], [record], deadline=time.monotonic() + 10
+        )
+        self.assertEqual(len(rows), 1)
+        managed = rows[0]
+        self.assertTrue(managed["managed"])
+        self.assertEqual(managed["cwd"], expected_cwd)
+        read = await reopened.read(managed, 20, deadline=time.monotonic() + 10)
+        self.assertEqual(read["cwd"], expected_cwd)
+        self.assertEqual(record["native"]["cwd"], expected_cwd)
+
+        readonly_identity = {
+            key: native[key]
+            for key in ("boot_id", "server_pid", "server_start", "pane_pid", "pane_start")
+        }
+        readonly_connection = Connection(
+            id=self.first.connection.id,
+            backend="tmux",
+            executable=self.first.connection.executable,
+            socket=self.first.connection.socket,
+            read_targets=({
+                "project": self.first.project.id,
+                "native_id": native["native_id"],
+                "identity": readonly_identity,
+            },),
+        )
+        readonly_backend = TmuxBackend(readonly_connection, self.first.runner)
+        readonly_rows = await readonly_backend.inventory(
+            [self.first.project], [], deadline=time.monotonic() + 10
+        )
+        self.assertEqual(len(readonly_rows), 1)
+        readonly = readonly_rows[0]
+        self.assertTrue(readonly["readonly"])
+        self.assertEqual(readonly["cwd"], expected_cwd)
+        readonly_read = await readonly_backend.read(
+            readonly, 20, deadline=time.monotonic() + 10
+        )
+        self.assertEqual(readonly_read["cwd"], expected_cwd)
+
+    async def test_unavailable_process_cwd_hides_target_and_prevents_read_or_input(self):
+        missing_cwd = self.root / "removed-process-cwd"
+        missing_cwd.mkdir()
+        agent_script = self.root / "agent_removed_cwd.py"
+        agent_script.write_text(
+            "import os, sys, time\n"
+            "os.chdir(sys.argv[1])\n"
+            "while True:\n"
+            "    time.sleep(1)\n",
+            encoding="utf-8",
+        )
+        self.first.profile = Profile(
+            id="omp",
+            kind="omp",
+            executable=Path(sys.executable),
+            args=(str(agent_script), str(missing_cwd)),
+            backends=("tmux",),
+            input_mode="bracketed-paste",
+        )
+        nonce = "nonce-missing-cwd"
+        started = await self.first.backend.start(
+            self.first.project,
+            self.first.profile,
+            "removed-cwd",
+            None,
+            {"target_id": "removed-cwd", "nonce": nonce},
+            deadline=time.monotonic() + 10,
+        )
+        native = started["identity"]
+        for _ in range(200):
+            try:
+                actual_cwd = Path(f"/proc/{native['pane_pid']}/cwd").resolve(strict=True)
+            except OSError:
+                actual_cwd = None
+            if actual_cwd == missing_cwd.resolve():
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(actual_cwd, missing_cwd.resolve())
+
+        record = {
+            "target_id": "removed-cwd",
+            "nonce": nonce,
+            "state": "active",
+            "binding": {
+                "connection": self.first.connection.id,
+                "project": self.first.project.id,
+                "profile": self.first.profile.id,
+            },
+            "native": started,
+        }
+        rows = await self.first.backend.inventory(
+            [self.first.project], [record], deadline=time.monotonic() + 10
+        )
+        self.assertEqual(len(rows), 1)
+        target = rows[0]
+        missing_cwd.rmdir()
+
+        self.assertEqual(
+            await self.first.backend.inventory(
+                [self.first.project], [record], deadline=time.monotonic() + 10
+            ),
+            [],
+        )
+        before = len(self.calls(self.first))
+        with self.assertRaises(SupervisionError):
+            await self.first.backend.read(target, 20, deadline=time.monotonic() + 10)
+        with self.assertRaises(SupervisionError):
+            await self.first.backend.prompt(
+                target,
+                "must not send",
+                self.first.profile,
+                deadline=time.monotonic() + 10,
+            )
+        with self.assertRaises(SupervisionError):
+            await self.first.backend.answer(
+                target, ["y"], deadline=time.monotonic() + 10
+            )
+        new_calls = self.calls(self.first)[before:]
+        self.assertFalse(any("capture-pane" in call["argv"] for call in new_calls))
+        self.assertFalse(any("paste-buffer" in call["argv"] for call in new_calls))
+        self.assertFalse(any("send-keys" in call["argv"] for call in new_calls))
+
     async def test_scheduler_state_change_preserves_live_identity_but_birth_or_exit_does_not(self):
         from unittest.mock import patch
         from dotunnel import tmux as tmux_module

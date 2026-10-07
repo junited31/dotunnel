@@ -165,6 +165,14 @@ def _proc_executable(pid: int) -> Path | None:
         return None
 
 
+def _proc_cwd(pid: int) -> Path | None:
+    try:
+        cwd = Path(f"/proc/{pid}/cwd").resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return cwd if cwd.is_absolute() else None
+
+
 def _runtime_command(executable: Path, args: Sequence[str], *, trusted_path: str) -> tuple[list[str], Path]:
     """Resolve direct binaries and ordinary shebang/env launchers exactly."""
     if not executable.is_absolute():
@@ -206,10 +214,7 @@ def _runtime_command(executable: Path, args: Sequence[str], *, trusted_path: str
         except ValueError:
             _raise("unsupported_operation", "invalid_profile_shebang")
         if options and options[0] == "-S":
-            try:
-                command = shlex.split(" ".join(options[1:]))
-            except ValueError:
-                _raise("unsupported_operation", "invalid_profile_shebang")
+            command = options[1:]
         else:
             command = options
         if not command or command[0].startswith("-"):
@@ -235,25 +240,30 @@ def _runtime_command(executable: Path, args: Sequence[str], *, trusted_path: str
     return runtime_argv, runtime_executable
 
 
-def _process_matches(
+def _verified_process_cwd(
     pid: int,
     start: int,
     *,
     argv: Sequence[str] | None = None,
     executable: Path | None = None,
     nonce: str | None = None,
-) -> bool:
+) -> Path | None:
     before = _proc_stat(pid)
     if before is None or before[0] in ("Z", "X", "x") or before[1] != start:
-        return False
+        return None
     if argv is not None and _proc_cmdline(pid) != list(argv):
-        return False
+        return None
     if executable is not None and _proc_executable(pid) != executable:
-        return False
+        return None
     if nonce is not None and not _proc_has_nonce(pid, nonce):
-        return False
+        return None
+    cwd = _proc_cwd(pid)
+    if cwd is None:
+        return None
     after = _proc_stat(pid)
-    return after is not None and after[1] == start and after[0] not in ("Z", "X", "x")
+    if after is None or after[1] != start or after[0] in ("Z", "X", "x"):
+        return None
+    return cwd
 
 
 def _project_map(projects: Sequence[Project]) -> dict[str, Project]:
@@ -452,8 +462,6 @@ class TmuxBackend:
             return None
         if native.get("project") not in (None, project.id) or native.get("profile") not in (None, profile_id):
             return None
-        if native.get("cwd") not in (None, str(project.path)):
-            return None
         argv = native.get("command_argv")
         executable_value = native.get("command_executable")
         name = native.get("name", record.get("name", identity["native_id"]))
@@ -499,6 +507,7 @@ class TmuxBackend:
         readonly: bool,
         profile: str | None,
         managed: bool,
+        cwd: Path,
     ) -> dict[str, Any]:
         return {
             "native_id": identity["native_id"],
@@ -509,7 +518,7 @@ class TmuxBackend:
             "agent_state": "unknown",
             "state_source": "unavailable",
             "readonly": readonly,
-            "cwd": str(project.path),
+            "cwd": str(cwd),
             "original_repo": None,
             "profile": profile,
             "connection": self.connection.id,
@@ -625,7 +634,8 @@ class TmuxBackend:
                 command_executable,
             )
             pane = (native_id, pane_pid, dead)
-            if not self._verify_process(identity, pane, server=server, managed=managed):
+            process_cwd = self._verified_cwd(identity, pane, server=server, managed=managed)
+            if process_cwd is None:
                 _raise("delivery_unknown", "tmux_start_process_identity_unavailable")
         except asyncio.CancelledError:
             raise
@@ -639,26 +649,27 @@ class TmuxBackend:
             readonly=False,
             profile=profile.id,
             managed=True,
+            cwd=process_cwd,
         )
         row["command_argv"] = command_argv
         row["command_executable"] = str(command_executable)
         self._remember(identity, managed)
         return row
 
-    def _verify_process(
+    def _verified_cwd(
         self,
         identity: Mapping[str, Any],
         pane: tuple[str, int, bool],
         *,
         server: tuple[str, int, int],
         managed: _Managed | None,
-    ) -> bool:
+    ) -> Path | None:
         if not self._server_matches(identity, server):
-            return False
+            return None
         native_id, pid, dead = pane
         if native_id != identity.get("native_id") or pid != identity.get("pane_pid") or dead:
-            return False
-        return _process_matches(
+            return None
+        return _verified_process_cwd(
             pid,
             identity["pane_start"],
             argv=managed.argv if managed is not None else None,
@@ -702,12 +713,15 @@ class TmuxBackend:
             if not self._server_matches(identity, server):
                 continue
             pane = panes.get(identity["native_id"])
-            if pane is None or not self._verify_process(
+            if pane is None:
+                continue
+            process_cwd = self._verified_cwd(
                 identity,
                 (identity["native_id"], *pane),
                 server=server,
                 managed=managed,
-            ):
+            )
+            if process_cwd is None:
                 continue
             self._remember(identity, managed)
             rows[(project.id, identity["native_id"])] = self._row(
@@ -717,18 +731,22 @@ class TmuxBackend:
                 readonly=False,
                 profile=managed.profile,
                 managed=True,
+                cwd=process_cwd,
             )
 
         for project, identity in readonly_candidates:
             if not self._server_matches(identity, server):
                 continue
             pane = panes.get(identity["native_id"])
-            if pane is None or not self._verify_process(
+            if pane is None:
+                continue
+            process_cwd = self._verified_cwd(
                 identity,
                 (identity["native_id"], *pane),
                 server=server,
                 managed=None,
-            ):
+            )
+            if process_cwd is None:
                 continue
             key = (project.id, identity["native_id"])
             if key in rows:
@@ -740,6 +758,7 @@ class TmuxBackend:
                 readonly=True,
                 profile=None,
                 managed=False,
+                cwd=process_cwd,
             )
         return sorted(rows.values(), key=lambda row: (row["project"], row["name"], row["native_id"]))
 
@@ -757,7 +776,7 @@ class TmuxBackend:
         *,
         deadline: float,
         profile: Profile | None = None,
-    ) -> tuple[dict[str, Any], _Managed]:
+    ) -> tuple[dict[str, Any], _Managed, Path]:
         if target.get("readonly") is not False or target.get("managed") is not True:
             _raise("unsupported_operation", "managed_pane_required")
         identity = self._target_identity(target, managed=True)
@@ -782,9 +801,12 @@ class TmuxBackend:
         if not self._server_matches(identity, server):
             _raise("stale_target", "server_generation_changed")
         pane = await self._pane(identity["native_id"], deadline=deadline)
-        if not self._verify_process(identity, pane, server=server, managed=managed):
+        process_cwd = self._verified_cwd(identity, pane, server=server, managed=managed)
+        if process_cwd is None:
             _raise("stale_target", "pane_generation_changed")
-        return identity, managed
+        if target.get("cwd") != str(process_cwd):
+            _raise("stale_target", "pane_cwd_changed")
+        return identity, managed, process_cwd
 
 
     async def _verify_readonly_target(
@@ -792,7 +814,7 @@ class TmuxBackend:
         target: Mapping[str, Any],
         *,
         deadline: float,
-    ) -> tuple[dict[str, Any], Project]:
+    ) -> tuple[dict[str, Any], Project, Path]:
         actual = self._target_identity(target, managed=False)
         project_id = target.get("project")
         project = self._readonly_projects.get(project_id) if isinstance(project_id, str) else None
@@ -818,9 +840,12 @@ class TmuxBackend:
         if not self._server_matches(actual, server):
             _raise("stale_target", "server_generation_changed")
         pane = await self._pane(actual["native_id"], deadline=deadline)
-        if not self._verify_process(actual, pane, server=server, managed=None):
+        process_cwd = self._verified_cwd(actual, pane, server=server, managed=None)
+        if process_cwd is None:
             _raise("stale_target", "pane_generation_changed")
-        return actual, project
+        if target.get("cwd") != str(process_cwd):
+            _raise("stale_target", "pane_cwd_changed")
+        return actual, project, process_cwd
 
     async def read(self, target: dict[str, Any], lines: int, *, deadline: float) -> dict[str, Any]:
         if type(lines) is not int or not 1 <= lines <= _MAX_READ_LINES:
@@ -828,9 +853,9 @@ class TmuxBackend:
         if not isinstance(target, Mapping):
             _raise("stale_target", "invalid_target")
         if target.get("readonly") is True:
-            identity, _ = await self._verify_readonly_target(target, deadline=deadline)
+            identity, _, cwd = await self._verify_readonly_target(target, deadline=deadline)
         else:
-            identity, _ = await self._verify_managed_target(target, deadline=deadline)
+            identity, _, cwd = await self._verify_managed_target(target, deadline=deadline)
         _, stdout, _ = await self._execute(
             ("capture-pane", "-p", "-t", identity["native_id"]),
             deadline=deadline,
@@ -840,6 +865,7 @@ class TmuxBackend:
         return {
             **dict(target),
             "identity": identity,
+            "cwd": str(cwd),
             "process_state": "running",
             "agent_state": "unknown",
             "state_source": "unavailable",
@@ -920,7 +946,7 @@ class TmuxBackend:
         expected_argv, expected_executable = self._validate_profile(profile)
         if not isinstance(target, Mapping):
             _raise("stale_target", "invalid_target")
-        identity, managed = await self._verify_managed_target(
+        identity, managed, _ = await self._verify_managed_target(
             target, deadline=deadline, profile=profile
         )
         verified_target = dict(target)
@@ -994,7 +1020,7 @@ class TmuxBackend:
         dispatched = False
         try:
             # Map only fixed allowlisted keys immediately before dispatch.
-            identity, _ = await self._verify_managed_target(target, deadline=deadline)
+            identity, _, _ = await self._verify_managed_target(target, deadline=deadline)
             dispatched = True
             code, _, _ = await self._execute(
                 ("send-keys", "-t", identity["native_id"], *(_KEY_NAMES[key] for key in keys)),

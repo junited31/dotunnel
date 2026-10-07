@@ -128,7 +128,10 @@ class TaskRunnerTests(unittest.IsolatedAsyncioTestCase):
         release = self.root / "held-release"
         child_code = (
             "import os, pathlib, time\n"
-            f"pathlib.Path({str(started)!r}).write_text(str(os.getpid()))\n"
+            f"started = pathlib.Path({str(started)!r})\n"
+            "pending = started.with_suffix('.pending')\n"
+            "pending.write_text(str(os.getpid()))\n"
+            "pending.replace(started)\n"
             f"release = pathlib.Path({str(release)!r})\n"
             "while not release.exists():\n"
             "    time.sleep(0.01)\n"
