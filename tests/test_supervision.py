@@ -436,7 +436,10 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             command = (
                 "import os,pathlib,subprocess,sys,time\n"
                 "helper=subprocess.Popen(['/usr/bin/sleep','30'])\n"
-                "pathlib.Path(sys.argv[1]).write_text(f'{os.getpid()} {helper.pid}')\n"
+                "pid_file=pathlib.Path(sys.argv[1])\n"
+                "pending=pid_file.with_suffix('.pending')\n"
+                "pending.write_text(f'{os.getpid()} {helper.pid}')\n"
+                "pending.replace(pid_file)\n"
                 "time.sleep(30)\n"
             )
             task = asyncio.create_task(run_cli([sys.executable, '-I', '-c', command, str(pid_file)], deadline=time.monotonic() + 5))

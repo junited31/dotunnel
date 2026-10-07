@@ -637,9 +637,12 @@ class SupervisionStateTests(unittest.TestCase):
 
             state = SupervisionState(Path(sys.argv[1]))
             marker = Path(sys.argv[2])
+            real_replace = os.replace
 
             def stop_before_rename(source, destination, *args, **kwargs):
-                marker.write_text(os.fspath(source) + "\\n" + os.fspath(destination))
+                pending = marker.with_name(marker.name + ".pending")
+                pending.write_text(os.fspath(source) + "\\n" + os.fspath(destination))
+                real_replace(pending, marker)
                 while True:
                     time.sleep(1)
 
