@@ -24,6 +24,7 @@ Commands:
   setup      Create a private Tunnel setup or reconfigure its CLI integrations.
   update     Check GitHub Releases and ask Y/n before upgrading this virtualenv.
   doctor     Validate an existing setup and inspect local Tunnel/CLI readiness.
+  supervision  Initialize or explicitly reinitialize private supervision state.
 
 Engine commands (normally started by the Tunnel client or a registered task):
   serve --config PATH [--check-config]
@@ -40,6 +41,10 @@ Setup options:
 Doctor options:
   --directory DIR       Existing setup directory (default: .dotunnel-setup in the current directory).
   --tunnel-client PATH  Trusted absolute executable (default: installed tunnel-client on PATH).
+
+Supervision options (dotunnel supervision):
+  init --config PATH    Initialize configured private state; never starts an agent.
+  reinit --config PATH  Rotate the epoch after interactive reconciliation; retain prior state.
 
 Setup and doctor require Linux and a non-root user; setup also requires an interactive terminal.
 A new setup is created after prompts. An existing directory reconfigures only setup-owned CLI
@@ -308,6 +313,10 @@ def main(argv: list[str] | None = None) -> int:
         return run_update(*_installed_version())
     if command == "doctor":
         return _diagnose(command_args)
+    if command == "supervision":
+        from .supervision_cli import main as supervision_main
+
+        return int(supervision_main(command_args))
     if command == "setup":
         if not _supported_environment():
             return _environment_error()

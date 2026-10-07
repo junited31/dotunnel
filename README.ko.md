@@ -5,15 +5,17 @@
 [English](README.md) | **한국어**
 
 `dotunnel`은 Linux 서버에서 실행하는 자체 호스팅 stdio MCP 서버이자
-private Secure MCP Tunnel 연결 도우미입니다. 지정한 workspace의 파일 도구와
-관리자가 정의한 고정 작업만 제공합니다. 호스팅 서비스나 공개 MCP endpoint가
-아닙니다.
+private Secure MCP Tunnel 연결 도우미입니다. 기본 API는 workspace file/task
+도구 일곱 개를 제공합니다. 운영자가 Herdr 및/또는 tmux 대상을 supervision
+registry에 명시적으로 등록하면 공통 `agent_*` 도구 여덟 개가 추가됩니다.
+호스팅 서비스나 공개 MCP endpoint가 아닙니다.
 
 | 구분 | 포함 내용 |
 |---|---|
-| 기본 | Tunnel 설정·진단 도우미, 제한된 workspace 파일 도구와 고정 작업 |
-| 선택 | 별도 설치한 Codex·Claude Code·OMP CLI용 격리 작업 |
-| 선택 runner | 별도 설치하는 [공통 JSON-stdio adapter runner](adapter_runner/README.md); Herdr·Orca·tmux adapter는 포함하지 않음 |
+| 기본 | 제한된 workspace file/task MCP 도구 일곱 개 |
+| 선택 CLI 작업 | 별도 설치한 Codex·Claude Code·OMP CLI용 격리 작업 |
+| 선택 supervision | 명시적으로 등록한 Herdr 및/또는 tmux 대상용 공통 `agent_*` 도구 여덟 개 (활성화 시 총 15개) |
+| 선택 runner | 별도 설치하는 [공통 JSON-stdio adapter runner](adapter_runner/README.md); 기본 도구 일곱 개를 사용 |
 
 ## 요구사항
 
@@ -63,12 +65,34 @@ workspace는 `tasks: []`로 시작합니다. 계정 격리, private 설치와 Ch
 | `dotunnel setup` | Tunnel 설정 생성 또는 선택 CLI 연동 설정 |
 | `dotunnel doctor` | 설정·client·연결 상태 읽기 전용 진단 |
 | `dotunnel update` | 최신 안정 release 확인 후 대화형 업데이트 |
+| `dotunnel serve --config PATH` | trusted config로 stdio MCP 서버 실행 |
+| `dotunnel supervision init --config PATH` / `reinit` | 선택 supervision 상태를 명시적으로 초기화·교체 |
+
+## 선택 Herdr/tmux agent supervision
+
+trusted config에 고정 `supervision` registry를 넣고 private 상태를 명시적으로
+초기화해야 supervision이 활성화됩니다. 두 backend 중 하나 또는 둘 다 설정해도
+공통 `agent_*` 도구 여덟 개만 추가되므로 MCP 도구는 총 15개입니다. 고정
+project와 profile이 사용할 수 있는 connection을 제한합니다. Herdr session과
+tmux socket은 함께 등록할 수 있습니다. 기본 connection은 새 시작에만 사용하며
+broadcast나 자동 fallback을 허용하지 않습니다. 승인, handle, receipt와 identity
+제한은 [상세 안내](docs/guide.ko.md#7-선택-herdrtmux-agent-supervision)를 참고하세요.
+
+이 supervision 기능은 아직 release되지 않은 source 변경입니다. 기존 공개
+wheel과 installer pin은 변경하지 않습니다.
 
 ## 선택 공통 adapter runner
 
-[독립 runner](adapter_runner/README.md)는 기존 일곱 file/task MCP 도구를 사용합니다. 검토한 source에서 별도 설치하고 고정 작업 하나를 명시적으로 등록해야 하며, 기본 설치·setup은 이를 활성화하지 않습니다. mutation은 정확한 요청과 private registry profile에 묶인 로컬 대화형 승인이 필요합니다. durable replay는 재실행 없이 저장한 결과를 반환하며, 불명확한 효과는 `outcome_unknown`으로 유지합니다.
+[독립 runner](adapter_runner/README.md)는 기존 일곱 file/task MCP 도구를
+사용합니다. 검토한 source에서 별도 설치하고 고정 작업 하나를 명시적으로
+등록해야 하며, 기본 설치·setup은 이를 활성화하지 않습니다. mutation은 정확한
+요청과 private registry profile에 묶인 로컬 대화형 승인이 필요합니다. durable
+replay는 재실행 없이 저장한 결과를 반환하며, 불명확한 효과는
+`outcome_unknown`으로 유지합니다.
 
-실제 Herdr·Orca·tmux·provider adapter는 포함하거나 검증하지 않았습니다. 이번 source 추가로 기존 core release wheel이나 installer pin은 변경하지 않습니다.
+이 runner에는 Herdr·Orca·tmux·provider adapter가 포함되지 않습니다. Core
+supervision은 별도 기능으로 설정된 Herdr/tmux backend를 지원하며 Orca 지원은
+포함하지 않습니다.
 
 ## 안전
 
@@ -86,7 +110,7 @@ workspace는 `tasks: []`로 시작합니다. 계정 격리, private 설치와 Ch
 - `curl | sh`는 저장소의 설치 스크립트를 현재 사용자 권한으로 실행합니다.
   스크립트를 신뢰·검토하세요. wheel checksum이 shell 스크립트까지 무조건
   신뢰해도 된다는 뜻은 아닙니다.
-- source 개발 시 [커밋 전 secret 검사](docs/guide.ko.md#7-secret을-공개하지-않는-개발)를 켜고 runtime/key 파일을 checkout 밖에 두세요.
+- source 개발 시 [커밋 전 secret 검사](docs/guide.ko.md#8-secret을-공개하지-않는-개발)를 켜고 runtime/key 파일을 checkout 밖에 두세요.
 
 [상세 안내](docs/guide.ko.md) · [설계](DESIGN.md) ·
 [config 예시](config.example.json) · [라이선스](LICENSE)

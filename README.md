@@ -5,15 +5,17 @@
 **English** | [한국어](README.ko.md)
 
 `dotunnel` is a self-hosted stdio MCP server and helper for connecting a Linux
-server to a private Secure MCP Tunnel. It exposes files in one configured
-workspace and only administrator-defined fixed tasks. It is not a hosted
-service or public MCP endpoint.
+server to a private Secure MCP Tunnel. Its base API exposes seven bounded
+workspace file/task tools. An operator may optionally configure agent
+supervision for registered Herdr and/or tmux targets, adding eight shared
+`agent_*` tools. It is not a hosted service or public MCP endpoint.
 
 | Part | Includes |
 |---|---|
-| Core | Tunnel setup/diagnosis helpers, bounded workspace file tools and fixed tasks |
-| Optional | Isolated jobs for separately installed Codex, Claude Code or OMP CLIs |
-| Optional runner | Separately installed [common JSON-stdio adapter runner](adapter_runner/README.md); no Herdr/Orca/tmux adapters shipped |
+| Core | Seven bounded workspace file/task MCP tools |
+| Optional CLI jobs | Isolated jobs for separately installed Codex, Claude Code or OMP CLIs |
+| Optional supervision | Eight shared `agent_*` tools for explicitly configured Herdr and/or tmux targets (15 tools total when enabled) |
+| Optional runner | Separately installed [common JSON-stdio adapter runner](adapter_runner/README.md), which uses the seven base tools |
 
 ## Requirements
 
@@ -63,12 +65,35 @@ isolation, private installation and connecting the Tunnel to ChatGPT.
 | `dotunnel setup` | Create a Tunnel setup or configure optional CLI integrations |
 | `dotunnel doctor` | Read-only configuration, client and connection diagnosis |
 | `dotunnel update` | Check and interactively install a newer stable release |
+| `dotunnel serve --config PATH` | Run the stdio MCP server with a trusted configuration |
+| `dotunnel supervision init --config PATH` / `reinit` | Explicitly initialize or rotate optional supervision state |
+
+## Optional Herdr/tmux agent supervision
+
+Supervision is disabled unless the trusted configuration contains a fixed
+`supervision` registry and its private state has been explicitly initialized.
+The same eight shared `agent_*` tools are added whether one or both backends
+are configured, for 15 MCP tools total. Fixed projects and profiles restrict
+which registered connections can be used. Herdr sessions and tmux sockets may
+coexist; the default connection chooses a new start only and never enables
+broadcast or automatic fallback. See the [detailed guide](docs/guide.md#7-optional-herdrtmux-agent-supervision)
+for approvals, handles, receipts and identity limits.
+
+This supervision feature is unreleased source. The existing released wheel and
+installer pin remain unchanged.
 
 ## Optional common adapter runner
 
-The [standalone runner](adapter_runner/README.md) uses the existing seven file/task MCP tools. Install it separately from reviewed source and explicitly register one fixed task; base installation and setup do not enable it. Mutations require local interactive consent bound to the exact request and private registry profile. Durable replay returns the recorded outcome without redispatch; ambiguous effects remain `outcome_unknown`.
+The [standalone runner](adapter_runner/README.md) uses the existing seven
+file/task MCP tools. Install it separately from reviewed source and explicitly
+register one fixed task; base installation and setup do not enable it.
+Mutations require local interactive consent bound to the exact request and
+private registry profile. Durable replay returns the recorded outcome without
+redispatch; ambiguous effects remain `outcome_unknown`.
 
-No live Herdr, Orca, tmux or provider adapter is included or verified. This source-only addition does not change the released core wheel or installer pin.
+That runner ships no Herdr, Orca, tmux or provider adapters. Core supervision
+is a separate feature; it supports configured Herdr/tmux backends, while Orca
+support remains unavailable.
 
 ## Safety
 
@@ -87,7 +112,7 @@ No live Herdr, Orca, tmux or provider adapter is included or verified. This sour
 - `curl | sh` executes the repository's installer code as your user.
   Trust/review that script; the wheel checksum does not make the shell script
   itself a trust-free download.
-- For source development, enable the [pre-commit secret guard](docs/guide.md#7-development-without-publishing-secrets); keep runtime/key files outside the checkout.
+- For source development, enable the [pre-commit secret guard](docs/guide.md#8-development-without-publishing-secrets); keep runtime/key files outside the checkout.
 
 [Detailed guide](docs/guide.md) · [Design](DESIGN.md) ·
 [Example config](config.example.json) · [License](LICENSE)

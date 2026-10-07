@@ -4,7 +4,7 @@
 
 [English front page](../README.md) · [한국어](guide.ko.md) · [Design](../DESIGN.md) · [Example config](../config.example.json) · [Logo asset](../assets/dotunnel.png) · [License](../LICENSE)
 
-This guide covers installation, private Tunnel setup, workspace tools and optional native CLI jobs. `dotunnel` is a local stdio MCP server; it is not a hosted service, a public HTTP endpoint or a sandbox for arbitrary code.
+This guide covers installation, private Tunnel setup, workspace tools, optional native CLI jobs and optional Herdr/tmux agent supervision. `dotunnel` is a local stdio MCP server; it is not a hosted service, a public HTTP endpoint or a sandbox for arbitrary code.
 
 ## 1. Installation
 
@@ -98,6 +98,8 @@ Setup creates the initial workspace and config. For manual configuration, start 
 | `run_task(name)` | Starts one fixed task and returns a result ID immediately |
 | `get_task_result(result_id)` | Reads the current process's running/final result; at most 20 IDs are retained |
 
+Supervision is a separate optional API: the existing seven file/task tools remain unchanged, and one shared set of eight `agent_*` tools is registered only when supervision is configured. See section 7 for its configuration and safety contract.
+
 Paths are relative to `root`. Absolute paths, `..`, symlinks/hardlinks, special files, hidden paths and common credential/key names are refused or excluded. Parent directories must already exist; there are no delete, move, mkdir or chmod tools. Writes are hash-guarded against changes observed by this server but are not atomic with external editors and may be partial on an OS/I/O failure. One task runs at a time; output is capped at 16 KiB and excess is drained. Task stdin is closed and only a minimal environment is passed; this is not CPU, memory, disk or network isolation. Process-group cleanup does not guarantee termination of a child that escapes into a new session.
 
 Call `run_task(name)` once, save its `result_id`, then poll `get_task_result(result_id)` at a bounded interval. Polling does not start work. Check `exit_code`, `output` and `truncated`; `completed` does not mean exit code zero. There is no partial output while running. IDs are in-memory, limited to 20 and invalidated on server restart; never blindly retry a task after losing its start response.
@@ -116,7 +118,165 @@ Write only `{ "target": "alias", "mode": "review", "instruction": "..." }` to th
 
 Native execution failures return `status: failed`, `error_code: NATIVE_FAILED` and allowlisted `native_error_code` values (`SANDBOX_UNAVAILABLE`, `NATIVE_UNAVAILABLE`, `TIMEOUT`, `OUTPUT_LIMIT`, `NATIVE_FAILURE`, `INVALID_NATIVE_STREAM`) plus fixed `native_detail` values (`AUTH_FAILED`, `RATE_LIMITED`, `PROVIDER_ERROR`, `PERMISSION_DENIED`, `UNSUCCESSFUL_RESULT`, `INVALID_RESULT`, `EMPTY_RESULT`, `SUMMARY_TOO_LARGE`, `NO_RESULT`, `INVALID_STREAM`, `EXIT_NONZERO`); raw CLI logs are not returned. Other failed jobs use `CANDIDATE_INVALID`, `SOURCE_CONFLICT`, `ARTIFACT_FAILURE` or `JOB_FAILED`; rejected inputs use `INVALID_REQUEST` or `INVALID_CONFIG` (exit 2; failed jobs exit 1). Do not interpret a safety rejection as a successful result or automatically retry it.
 
-## 7. Development without publishing secrets
+## 7. Optional Herdr/tmux agent supervision
+
+Supervision is disabled unless a trusted `dotunnel` configuration contains a fixed `supervision` registry and its state is explicitly initialized. It can use configured Herdr sessions, tmux sockets, or both (up to four connections total). Projects bind canonical paths to allowed connections and profiles; profiles bind a CLI kind to an absolute executable and fixed arguments. Callers cannot supply a cwd, executable, arguments or environment. This is unreleased source; the existing released wheel and installer pin remain unchanged.
+
+The base [`config.example.json`](../config.example.json) intentionally stays minimal. This is a complete, syntactically valid illustrative configuration; replace the anonymous sample paths with your own trusted absolute paths. The Herdr and tmux backends may coexist in the same `connections` list when each is explicitly configured.
+
+```json
+{
+  "root": "/srv/example/workspace",
+  "tasks": [],
+  "supervision": {
+    "state_dir": "/srv/example/state/supervision",
+    "default_connection": "tmux-example",
+    "connections": [
+      {
+        "id": "tmux-example",
+        "backend": "tmux",
+        "executable": "/usr/bin/tmux",
+        "socket": "/srv/example/state/tmux-example.sock"
+      }
+    ],
+    "projects": [
+      {
+        "id": "example-project",
+        "path": "/srv/example/project",
+        "connections": ["tmux-example"],
+        "profiles": ["omp"]
+      }
+    ],
+    "profiles": [
+      {
+        "id": "omp",
+        "kind": "omp",
+        "executable": "/usr/local/bin/omp",
+        "args": [],
+        "backends": ["tmux"],
+        "input_mode": "bracketed-paste"
+      }
+    ],
+    "protected_paths": ["/srv/example/protected"]
+  }
+}
+```
+
+Initialize state before serving MCP requests:
+
+```sh
+dotunnel supervision init --config /path/to/trusted/config.json
+dotunnel serve --config /path/to/trusted/config.json
+```
+
+`init` creates private state only; it does not start agents. The state directory
+must be owned by the runtime UID, mode `0700`, with mode `0600` files, and remain
+outside the writable MCP `root`.
+MCP startup does not create missing state or silently recover damaged state.
+Use `dotunnel supervision reinit --config /path/to/trusted/config.json` as a
+deliberate authority rotation, not automatic recovery. It requires terminal
+acknowledgement and preserves the old namespace as `<state_dir>.previous`;
+reconcile that archive before requesting another rotation. Old handles,
+approvals and operation IDs do not become authority in the new namespace.
+
+### Tools, scopes and selection
+
+The registered common API has exactly eight tools:
+
+| Tool | Contract |
+|---|---|
+| `agent_status(connection?, project?, cursor?)` | Read-only inventory and recovery diagnostics, paged to 100 rows and 64 KiB; a changed registry/scope invalidates the cursor |
+| `agent_read(target, lines=80)` | Reads the latest screen tail, at most 1–200 lines and 16 KiB, and issues a signed observation valid for 60 seconds |
+| `agent_approve(scope)` | Approves the current configuration generation for `connection_id:project_id` |
+| `agent_revoke(scope)` | Revokes that scope; it does not stop an agent or retract delivered input |
+| `agent_start(project, profile, name, operation_id, connection?, worktree_branch?)` | Starts a registered profile; `name` is display text, not target identity; worktree branches are Herdr-only |
+| `agent_prompt(target, observation, text, operation_id)` | Rechecks the handle, current identity, approval and fresh observation before sending literal text (up to 8 KiB) |
+| `agent_answer(target, observation, keys, operation_id)` | Sends up to eight explicitly selected lowercase keys: `enter`, `esc`, `up`, `down`, `left`, `right`, `tab`, `y`, `n`, or `1`–`9` |
+| `agent_wait(target, observation, timeout_seconds=60)` | Waits for a bounded change and returns a fresh observation; maximum wait is 110 seconds |
+
+`agent_approve` and `agent_revoke` scopes are exactly `connection_id:project_id`
+and bind the active configuration generation. This is an operator mistake guard,
+not human authentication; the stdio MCP server has no separate caller identity.
+Restrict access to the stdio process and Tunnel. Scope changes invalidate old
+approvals and handles, but do not undo an effect that has already occurred.
+
+Targets are opaque signed handles, not display names, pane IDs or names supplied
+by a caller. A recovery identity or unresolved-start record is diagnostic only
+and is never an actionable target. The default connection selects a connection
+for a new start only. It does not approve a scope, resolve an ambiguous existing
+target, restart an agent, broadcast an operation or fall back to another
+connection. Existing targets require explicit handle selection, never
+display-name adoption.
+
+Herdr may expose only weak native process identity; its handles require fresh
+discovery after supervisor restart or connection failure. tmux provides stronger
+managed identity evidence: writes are limited to agents dotunnel started from
+fixed profiles with recorded and rechecked boot/server/pane/process identity.
+Arbitrary existing tmux panes are never adopted for input; register an exact
+`read_targets` identity to observe an existing pane read-only. Even this
+evidence and repeated checks are not an atomic delivery guarantee or a sandbox.
+Backend status, screen changes and confirmed input do not prove logical task
+success; tmux agent status may legitimately be `unknown`.
+
+Put `read_targets` on its tmux connection using the current exact identity;
+PID/start-time values are decimal strings. Replace all illustrative values
+with that server and pane's `/proc` evidence. A replaced process invalidates
+the registration, and approval never makes it writable.
+
+```json
+"read_targets": [{
+  "project": "example-project", "native_id": "%3",
+  "identity": {
+    "boot_id": "00000000-0000-4000-8000-000000000000",
+    "server_pid": "12345", "server_start": "100000",
+    "pane_pid": "12346", "pane_start": "100001"
+  }
+}]
+```
+
+Screen observations and native output may contain secrets; terminal/ANSI cleanup
+is not redaction.
+
+### Durable operations and execution limits
+
+Every start, prompt and answer requires a unique `operation_id`. Persistent
+receipts bind the ID to the canonical request: replaying the same ID and
+identical payload returns its recorded result without repeating native effects;
+reusing it with different content conflicts. A delivery or start reported as
+`unknown` may already have taken effect. Inspect its receipt and recovery
+diagnostics and reconcile the target before proceeding; never blindly retry an
+unknown operation with the same or a new ID. Recovery records are not handles.
+Receipts and target records are each limited to 1,000 entries of at most 64 KiB;
+they are not silently pruned.
+
+A `busy` refusal from `agent_revoke` is not a completed revocation. Wait for
+the in-flight mutation to finish, explicitly revoke again, and check status.
+
+The shared native CLI pool permits at most four concurrent CLI processes.
+Ordinary status/inspection/input calls have a 20-second deadline, a start has a
+180-second overall deadline, and `agent_wait` is capped at 110 seconds. Combined
+captured stdout and stderr are capped at 4 MiB. Status pages and screen excerpts
+are bounded as described above; these limits do not promise that an agent has
+finished or that its work is correct.
+
+`protected_paths` is an admission-time overlap guard: if a project's path,
+working directory or original repository overlaps a protected path in either
+direction, mutations are refused and only observation remains. It is not
+filesystem confinement, does not restrict a running native process, and is not
+a sandbox. Native agents retain their own account permissions, tools and
+network access.
+Native agents retain their own approval policies. For an OMP write-approval
+smoke, use `--approval-mode=always-ask` and owner-only YAML
+`tools.approval.write: prompt`; `--approval-mode=write` permits that tier rather
+than requiring its approval UI. Read the prompt and send only the user's
+explicit choice. Herdr prompt text can be visible in host process arguments
+during submission; do not send credentials.
+
+The standalone [`dotunnel-adapter-runner`](../adapter_runner/README.md) remains a
+separate contract and uses only the seven base tools. It ships no Herdr, Orca,
+tmux or provider adapters; Orca is not part of core supervision.
+
+## 8. Development without publishing secrets
 
 Keep the source checkout separate from private runtime configuration, keys and writable workspaces. `.gitignore` reduces accidental staging, but does not untrack existing files or prevent `git add -f`. Private repositories still need secret protection.
 
@@ -138,7 +298,7 @@ Before pushing, review `git diff --cached` locally, verify that runtime/key file
 
 For unpublished feature work, create a separate **private repository**, clone the public source and push to that private remote. A public GitHub fork remains public and cannot independently become private; see [GitHub fork visibility](https://docs.github.com/en/pull-requests/reference/forks). Keep public upstream as a fetch source; publish only reviewed code changes, never private runtime files or operational history. A separate private development repository is optional, not a runtime requirement.
 
-## 8. Maintainer draft releases
+## 9. Maintainer draft releases
 
 Publish source changes through a feature branch and PR. Public `main` requires `Secret scan`, `Python 3.11` and `Python 3.13` from GitHub Actions, an up-to-date base and resolved review conversations; these rules also apply to administrators. No direct main push, force-push or branch deletion.
 
