@@ -79,6 +79,466 @@ class SupervisionStateTests(unittest.TestCase):
         self.assertEqual(reopened.epoch, epoch)
         self.assertEqual(reopened.key, key)
 
+    def test_concurrent_initializers_serialize_directory_creation(self):
+        import json
+        import subprocess
+        import sys
+        import textwrap
+        import time
+
+        from dotunnel.supervision_state import SupervisionState
+
+        self.state_dir.mkdir(mode=0o700)
+        self.state_dir.chmod(0o700)
+        barrier = self.base / "initializer-barrier"
+        barrier.mkdir(mode=0o700)
+        source_root = str(Path(__file__).resolve().parents[1])
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = os.pathsep.join(
+            part for part in (source_root, environment.get("PYTHONPATH", "")) if part
+        )
+        worker = textwrap.dedent(
+            """
+            import fcntl
+            import json
+            import os
+            import sys
+            import time
+            from pathlib import Path
+
+            from dotunnel.supervision_config import SupervisionError
+            from dotunnel.supervision_state import SupervisionState
+
+            state_path = Path(sys.argv[1])
+            barrier = Path(sys.argv[2])
+            worker_id = sys.argv[3]
+            other_id = "b" if worker_id == "a" else "a"
+            expected = state_path.stat()
+            real_listdir = os.listdir
+            real_flock = fcntl.flock
+            used = [False]
+
+            def wait_for_release(phase):
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    both_checked = all(
+                        (barrier / f"{phase}-{index}").exists() for index in ("a", "b")
+                    )
+                    other_contended = (
+                        (barrier / f"{phase}-{worker_id}").exists()
+                        and (barrier / f"flocked-{other_id}").exists()
+                    )
+                    if both_checked or other_contended:
+                        return
+                    time.sleep(0.005)
+                raise RuntimeError(f"initializer synchronization timed out at {phase}")
+
+            def coordinated_flock(directory, operation):
+                try:
+                    current = os.fstat(directory)
+                except OSError:
+                    current = None
+                if current is not None and (current.st_dev, current.st_ino) == (expected.st_dev, expected.st_ino):
+                    (barrier / f"flocked-{worker_id}").touch()
+                return real_flock(directory, operation)
+
+            def coordinated_listdir(directory=None):
+                if isinstance(directory, int) and not used[0]:
+                    try:
+                        current = os.fstat(directory)
+                    except OSError:
+                        current = None
+                    if current is not None and (current.st_dev, current.st_ino) == (expected.st_dev, expected.st_ino):
+                        used[0] = True
+                        (barrier / f"checked-{worker_id}").touch()
+                        wait_for_release("checked")
+                        entries = real_listdir(directory)
+                        (barrier / f"observed-{worker_id}").write_text(json.dumps(entries))
+                        wait_for_release("observed")
+                        return entries
+                return real_listdir(directory)
+
+            fcntl.flock = coordinated_flock
+            os.listdir = coordinated_listdir
+            (barrier / f"ready-{worker_id}").touch()
+            deadline = time.monotonic() + 10
+            while not (barrier / "go").exists() and time.monotonic() < deadline:
+                time.sleep(0.005)
+            if not (barrier / "go").exists():
+                raise RuntimeError("parent did not release initializer barrier")
+
+            try:
+                state = SupervisionState.initialize(state_path)
+            except SupervisionError as error:
+                if error.code not in ("busy", "state_unsafe"):
+                    raise
+                print("ERR " + json.dumps({"code": error.code}), flush=True)
+            else:
+                print("OK " + json.dumps({"epoch": state.epoch, "key": state.key.hex()}), flush=True)
+                state.close()
+
+            """
+        )
+        processes = [
+            subprocess.Popen(
+                [sys.executable, "-c", worker, str(self.state_dir), str(barrier), worker_id],
+                cwd=source_root,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for worker_id in ("a", "b")
+        ]
+        try:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not all(
+                (barrier / f"ready-{worker_id}").exists() for worker_id in ("a", "b")
+            ):
+                if any(process.poll() is not None for process in processes):
+                    break
+                time.sleep(0.005)
+            self.assertTrue(
+                all((barrier / f"ready-{worker_id}").exists() for worker_id in ("a", "b")),
+                "both initializer processes must reach the start barrier",
+            )
+            (barrier / "go").touch()
+            outputs = []
+            for process in processes:
+                stdout, stderr = process.communicate(timeout=15)
+                self.assertEqual(process.returncode, 0, stderr)
+                outputs.extend(stdout.splitlines())
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+
+        successes = [json.loads(line[3:]) for line in outputs if line.startswith("OK ")]
+        failures = [json.loads(line[4:]) for line in outputs if line.startswith("ERR ")]
+        self.assertEqual(len(successes), 1, outputs)
+        self.assertEqual(len(failures), 1, outputs)
+        self.assertIn(failures[0]["code"], ("busy", "state_unsafe"))
+
+        authority = SupervisionState(self.state_dir)
+        self.addCleanup(authority.close)
+        self.assertEqual(authority.epoch, successes[0]["epoch"])
+        self.assertEqual(authority.key.hex(), successes[0]["key"])
+
+    def test_reinitialization_refuses_an_initialization_owner_and_preserves_archive(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+        from unittest.mock import patch
+        from dotunnel.supervision_config import SupervisionError
+        from dotunnel.supervision_state import SupervisionState
+
+        entered = threading.Event()
+        release = threading.Event()
+        real_fsync = os.fsync
+        def pause_after_lock_publication(fd):
+            real_fsync(fd)
+            if os.readlink(f"/proc/self/fd/{fd}") == str(self.state_dir / "lock"):
+                entered.set()
+                if not release.wait(5):
+                    raise TimeoutError("initialization barrier was not released")
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with patch("os.fsync", pause_after_lock_publication):
+                pending = executor.submit(SupervisionState.initialize, self.state_dir)
+                try:
+                    self.assertTrue(entered.wait(5))
+                    with self.assertRaises(SupervisionError) as refused:
+                        accidental = SupervisionState.reinitialize(self.state_dir)
+                        accidental.close()
+                    self.assert_code(refused.exception, "busy")
+                finally:
+                    release.set()
+                    winner = pending.result(timeout=5)
+                    winner.close()
+        old = SupervisionState(self.state_dir)
+        old_epoch = old.epoch
+        old.close()
+        published = {
+            path.relative_to(self.state_dir): path.read_bytes()
+            for path in self.state_dir.rglob("*") if path.is_file()
+        }
+        fresh = SupervisionState.reinitialize(self.state_dir)
+        self.addCleanup(fresh.close)
+        self.assertNotEqual(fresh.epoch, old_epoch)
+        previous = self.state_dir.with_name(self.state_dir.name + ".previous")
+        self.assertEqual(
+            {path.relative_to(previous): path.read_bytes() for path in previous.rglob("*") if path.is_file()},
+            published,
+        )
+
+    def test_sigkill_before_atomic_rename_is_archived_without_startup_recovery(self):
+        import signal
+        import subprocess
+        import sys
+        import textwrap
+        import time
+
+        from dotunnel.supervision_config import SupervisionError
+        from dotunnel.supervision_state import SupervisionState
+
+        old = self.open_initialized()
+
+        async def seed():
+            async with old.lock():
+                old.set_approval("connection:project", "generation-a", True)
+
+        asyncio.run(seed())
+        old_epoch, old_key = old.epoch, old.key
+        published = {
+            path.relative_to(self.state_dir): path.read_bytes()
+            for path in (self.state_dir / "approvals").glob("*.json")
+        }
+        old.close()
+
+        marker = self.base / "atomic-write-ready"
+        source_root = str(Path(__file__).resolve().parents[1])
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = os.pathsep.join(
+            part for part in (source_root, environment.get("PYTHONPATH", "")) if part
+        )
+        worker = textwrap.dedent(
+            """
+            import asyncio
+            import os
+            import sys
+            import time
+            from pathlib import Path
+
+            from dotunnel.supervision_state import SupervisionState
+
+            state = SupervisionState(Path(sys.argv[1]))
+            marker = Path(sys.argv[2])
+
+            def stop_before_rename(source, destination, *args, **kwargs):
+                marker.write_text(os.fspath(source) + "\\n" + os.fspath(destination))
+                while True:
+                    time.sleep(1)
+
+            os.replace = stop_before_rename
+
+            async def update():
+                async with state.lock():
+                    state.set_approval("connection:project", "generation-a", False)
+
+            asyncio.run(update())
+            """
+        )
+        process = subprocess.Popen(
+            [sys.executable, "-c", worker, str(self.state_dir), str(marker)],
+            cwd=source_root,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            deadline = time.monotonic() + 10
+            while not marker.exists() and time.monotonic() < deadline:
+                if process.poll() is not None:
+                    break
+                time.sleep(0.005)
+            self.assertTrue(marker.exists(), "writer must stop after fsync and before os.replace")
+            source_name, destination_name = marker.read_text().splitlines()
+            self.assertRegex(source_name, r"\.write-[0-9a-f]{32}\Z")
+            self.assertTrue(destination_name.endswith(".json"))
+            staged_path = self.state_dir / "approvals" / source_name
+            staged_bytes = staged_path.read_bytes()
+            process.send_signal(signal.SIGKILL)
+            process.communicate(timeout=5)
+            self.assertEqual(process.returncode, -signal.SIGKILL)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=5)
+
+        with self.assertRaises(SupervisionError) as startup_error:
+            SupervisionState(self.state_dir)
+        self.assert_code(startup_error.exception, "state_unsafe")
+        self.assertEqual(staged_path.read_bytes(), staged_bytes)
+        self.assertEqual(
+            {
+                path.relative_to(self.state_dir): path.read_bytes()
+                for path in (self.state_dir / "approvals").glob("*.json")
+            },
+            published,
+        )
+
+        fresh = SupervisionState.reinitialize(self.state_dir)
+        self.addCleanup(fresh.close)
+        previous_path = self.state_dir.with_name(self.state_dir.name + ".previous")
+        self.assertEqual((previous_path / "approvals" / source_name).read_bytes(), staged_bytes)
+        self.assertEqual(
+            {
+                path.relative_to(previous_path): path.read_bytes()
+                for path in (previous_path / "approvals").glob("*.json")
+            },
+            published,
+        )
+        self.assertNotEqual(fresh.epoch, old_epoch)
+        self.assertNotEqual(fresh.key, old_key)
+        self.assertFalse(fresh.approved("connection:project", "generation-a"))
+
+    def test_reinitialization_archives_valid_root_staging_file_verbatim(self):
+        from dotunnel.supervision_config import SupervisionError
+        from dotunnel.supervision_state import SupervisionState
+
+        state = self.open_initialized()
+        old_epoch, old_key = state.epoch, state.key
+        state.close()
+        staged_name = ".write-" + ("a" * 32)
+        staged_bytes = b'{"incomplete":"root metadata write"'
+        staged_path = self.state_dir / staged_name
+        staged_path.write_bytes(staged_bytes)
+        staged_path.chmod(0o600)
+
+        with self.assertRaises(SupervisionError) as startup_error:
+            SupervisionState(self.state_dir)
+        self.assert_code(startup_error.exception, "state_unsafe")
+        self.assertEqual(staged_path.read_bytes(), staged_bytes)
+
+        fresh = SupervisionState.reinitialize(self.state_dir)
+        self.addCleanup(fresh.close)
+        previous_path = self.state_dir.with_name(self.state_dir.name + ".previous")
+        self.assertEqual((previous_path / staged_name).read_bytes(), staged_bytes)
+        self.assertNotEqual(fresh.epoch, old_epoch)
+        self.assertNotEqual(fresh.key, old_key)
+
+    def test_reinitialization_rejects_malformed_staging_entries_at_root_and_categories(self):
+        import hashlib
+
+        from dotunnel.supervision_config import SupervisionError
+        from dotunnel.supervision_state import SupervisionState
+
+        corruptions = ("unknown", "malformed_name", "symlink", "hardlink", "oversized", "wrong_mode")
+        for location in ("root", "category"):
+            for corruption in corruptions:
+                with self.subTest(location=location, corruption=corruption):
+                    self.state_dir = self.base / f"malformed-{location}-{corruption}"
+                    state = self.open_initialized()
+
+                    async def seed():
+                        async with state.lock():
+                            state.set_approval("connection:project", "generation-a", True)
+
+                    asyncio.run(seed())
+                    published_path = next((self.state_dir / "approvals").glob("*.json"))
+                    published_bytes = published_path.read_bytes()
+                    old_metadata = (self.state_dir / "epoch.json").read_bytes()
+                    old_key = (self.state_dir / "key").read_bytes()
+                    state.close()
+
+                    directory = self.state_dir if location == "root" else self.state_dir / "approvals"
+                    if corruption == "unknown":
+                        staged_path = directory / "unexpected"
+                    elif corruption == "malformed_name":
+                        staged_path = directory / (".write-" + "b" * 31)
+                    else:
+                        staged_path = directory / (
+                            ".write-" + hashlib.sha256(f"{location}-{corruption}".encode()).hexdigest()[:32]
+                        )
+                    if corruption in ("unknown", "malformed_name", "oversized", "wrong_mode"):
+                        staged_path.write_bytes(b"x" * (65_537 if corruption == "oversized" else 1))
+                        staged_path.chmod(0o640 if corruption == "wrong_mode" else 0o600)
+                    elif corruption == "symlink":
+                        target = self.base / f"symlink-target-{location}"
+                        target.write_bytes(b"target")
+                        staged_path.symlink_to(target)
+                    elif corruption == "hardlink":
+                        target = self.base / f"hardlink-target-{location}"
+                        target.write_bytes(b"target")
+                        target.chmod(0o600)
+                        os.link(target, staged_path)
+
+                    with self.assertRaises(SupervisionError) as startup_error:
+                        SupervisionState(self.state_dir)
+                    self.assert_code(startup_error.exception, "state_unsafe")
+                    with self.assertRaises(SupervisionError) as reinit_error:
+                        SupervisionState.reinitialize(self.state_dir)
+                    self.assert_code(reinit_error.exception, "state_unsafe")
+                    self.assertEqual((self.state_dir / "epoch.json").read_bytes(), old_metadata)
+                    self.assertEqual((self.state_dir / "key").read_bytes(), old_key)
+                    self.assertEqual(published_path.read_bytes(), published_bytes)
+                    self.assertTrue(staged_path.exists() or staged_path.is_symlink())
+
+    def test_reinitialization_refuses_staging_files_owned_by_another_user(self):
+        import hashlib
+
+        from dotunnel.supervision_config import SupervisionError
+        from dotunnel.supervision_state import SupervisionState
+
+        for location in ("root", "category"):
+            with self.subTest(location=location):
+                self.state_dir = self.base / f"foreign-staging-{location}"
+                state = self.open_initialized()
+                old_metadata = (self.state_dir / "epoch.json").read_bytes()
+                old_key = (self.state_dir / "key").read_bytes()
+                state.close()
+                directory = self.state_dir if location == "root" else self.state_dir / "approvals"
+                staged_path = directory / (
+                    ".write-" + hashlib.sha256(location.encode()).hexdigest()[:32]
+                )
+                staged_path.write_bytes(b"foreign owner")
+                staged_path.chmod(0o600)
+                try:
+                    os.chown(staged_path, os.getuid() + 1, -1)
+                except PermissionError:
+                    self.skipTest("changing a test file owner requires elevated privileges")
+
+                with self.assertRaises(SupervisionError) as startup_error:
+                    SupervisionState(self.state_dir)
+                self.assert_code(startup_error.exception, "state_unsafe")
+                with self.assertRaises(SupervisionError) as reinit_error:
+                    SupervisionState.reinitialize(self.state_dir)
+                self.assert_code(reinit_error.exception, "state_unsafe")
+                self.assertEqual((self.state_dir / "epoch.json").read_bytes(), old_metadata)
+                self.assertEqual((self.state_dir / "key").read_bytes(), old_key)
+                self.assertTrue(staged_path.exists())
+
+    def test_reinitialization_allows_one_staged_file_beyond_category_capacity(self):
+        import hashlib
+
+        from dotunnel.supervision_config import SupervisionError
+        from dotunnel.supervision_state import SupervisionState
+
+        state = self.open_initialized()
+        state.close()
+        category = self.state_dir / "approvals"
+        for index in range(1_000):
+            name = hashlib.sha256(f"archive-capacity-{index}".encode()).hexdigest() + ".json"
+            record = category / name
+            record.write_bytes(b"{}")
+            record.chmod(0o600)
+        staged_name = ".write-" + ("c" * 32)
+        staged_bytes = b"interrupted write"
+        staged_path = category / staged_name
+        staged_path.write_bytes(staged_bytes)
+        staged_path.chmod(0o600)
+
+        fresh = SupervisionState.reinitialize(self.state_dir)
+        self.addCleanup(fresh.close)
+        previous = self.state_dir.with_name(self.state_dir.name + ".previous")
+        self.assertEqual(len(list((previous / "approvals").glob("*.json"))), 1_000)
+        self.assertEqual((previous / "approvals" / staged_name).read_bytes(), staged_bytes)
+
+        self.state_dir = self.base / "too-many-staged-files"
+        another = self.open_initialized()
+        another.close()
+        category = self.state_dir / "approvals"
+        root_stage = self.state_dir / (".write-" + "d" * 32)
+        category_stage = category / (".write-" + "e" * 32)
+        for staged_path in (root_stage, category_stage):
+            staged_path.write_bytes(b"interrupted write")
+            staged_path.chmod(0o600)
+        with self.assertRaises(SupervisionError) as reinit_error:
+            SupervisionState.reinitialize(self.state_dir)
+        self.assert_code(reinit_error.exception, "state_unsafe")
+        self.assertTrue(root_stage.exists())
+        self.assertTrue(category_stage.exists())
+
     def test_reinitialization_rotates_epoch_and_starts_empty_namespace(self):
         from dotunnel.supervision_state import SupervisionState
 

@@ -138,14 +138,19 @@ async def _run_cli(argv: Sequence[str], *, cwd: Path | None, deadline: float | N
         return code, stdout, stderr
     try:
         return await asyncio.wait_for(communicate(), max(0.001, deadline - time.monotonic()))
-    except BaseException as error:
+    except asyncio.TimeoutError:
+        raise SupervisionError('backend_unavailable', reason='deadline') from None
+    finally:
+        # Ordinary request helpers remain ours even after the CLI exits.
+        # Detached backend servers and agents have their own process groups.
         cleanup = asyncio.create_task(_cleanup(process))
         end = time.monotonic() + 1.0
+        cancelled = False
         while not cleanup.done() and time.monotonic() < end:
             try:
                 await asyncio.wait_for(asyncio.shield(cleanup), max(0.001, end - time.monotonic()))
             except asyncio.CancelledError:
-                continue
+                cancelled = True
             except asyncio.TimeoutError:
                 break
         if not cleanup.done():
@@ -153,9 +158,10 @@ async def _run_cli(argv: Sequence[str], *, cwd: Path | None, deadline: float | N
             transport = getattr(process, '_transport', None)
             if transport is not None:
                 transport.close()
-        if isinstance(error, asyncio.TimeoutError):
-            raise SupervisionError('backend_unavailable', reason='deadline') from None
-        raise
+        elif not cleanup.cancelled():
+            cleanup.result()
+        if cancelled:
+            raise asyncio.CancelledError
 
 
 class CliRunner:

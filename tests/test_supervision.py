@@ -375,6 +375,39 @@ class SupervisionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_success_reaps_ordinary_helpers_but_preserves_detached_backend(self):
+        import signal
+        ordinary = detached = None
+        command = (
+            "import os,subprocess\n"
+            "options={'stdin':subprocess.DEVNULL,'stdout':subprocess.DEVNULL,'stderr':subprocess.DEVNULL}\n"
+            "ordinary=subprocess.Popen(['/usr/bin/sleep','30'],**options)\n"
+            "detached=subprocess.Popen(['/usr/bin/sleep','30'],start_new_session=True,**options)\n"
+            "print(ordinary.pid,detached.pid,os.getpid(),flush=True)\n"
+        )
+        def live(pid):
+            try:
+                return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] not in ('Z', 'X', 'x')
+            except FileNotFoundError:
+                return False
+        try:
+            code, output, _ = await run_cli([sys.executable, '-I', '-c', command], deadline=time.monotonic() + 5)
+            ordinary, detached, leader = map(int, output.split())
+            self.assertEqual(code, 0)
+            self.assertNotEqual(os.getpgid(detached), leader)
+            end = time.monotonic() + 1
+            while live(ordinary) and time.monotonic() < end:
+                await asyncio.sleep(.01)
+            self.assertFalse(live(ordinary), 'ordinary request helper survived successful completion')
+            self.assertTrue(live(detached), 'detached backend lifetime must not be ended by request cleanup')
+        finally:
+            for pid in (ordinary, detached):
+                if pid is not None:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
     async def test_bounded_output_does_not_wait_for_unbounded_child(self):
         with self.assertRaises(SupervisionError):
             await run_cli([sys.executable, '-c', "import sys;sys.stdout.buffer.write(b'x'*5000000)"], deadline=time.monotonic()+5)
