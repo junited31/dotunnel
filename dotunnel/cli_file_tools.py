@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+from dotunnel.file_access import FileAccess
 from dotunnel.files import WorkspaceFiles
 
 
@@ -41,7 +42,17 @@ class CandidateFileTools:
         self._editable = editable
         self._editable_set = frozenset(editable)
         self._mode = mode
-        self._workspace = WorkspaceFiles(snapshot)
+        access = FileAccess.parse(
+            {
+                "read": [{"path": path, "kind": "file"} for path in files],
+                "write": (
+                    [{"path": path, "kind": "file"} for path in editable]
+                    if mode == "edit"
+                    else []
+                ),
+            }
+        )
+        self._workspace = WorkspaceFiles(snapshot, access)
 
     @staticmethod
     def _is_relative_path(path: str) -> bool:

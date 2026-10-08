@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 import dotunnel.files as files_module
+from dotunnel.file_access import FileAccess
 from dotunnel.files import WorkspaceFiles
 
 
@@ -21,7 +22,10 @@ class WorkspaceFilesTests(unittest.TestCase):
         self.temp_path = Path(self.temp.name)
         self.root = self.temp_path / "workspace"
         self.root.mkdir()
-        self.files = WorkspaceFiles(self.root)
+        self.access = FileAccess.parse(
+            {"read": [{"path": ".", "kind": "tree"}], "write": [{"path": ".", "kind": "tree"}]}
+        )
+        self.files = WorkspaceFiles(self.root, self.access)
         self.addCleanup(self.files.close)
 
     def assertClientError(self, operation):
@@ -141,14 +145,14 @@ class WorkspaceFilesTests(unittest.TestCase):
         self.assertEqual(self.files.list_files("."), {"entries": [], "truncated": False})
 
     def test_root_cannot_be_filesystem_root_home_or_a_symlink(self):
-        self.assertClientError(lambda: WorkspaceFiles(Path("/")))
-        self.assertClientError(lambda: WorkspaceFiles(Path.home()))
+        self.assertClientError(lambda: WorkspaceFiles(Path("/"), self.access))
+        self.assertClientError(lambda: WorkspaceFiles(Path.home(), self.access))
 
         target = self.temp_path / "real-root"
         target.mkdir()
         root_link = self.temp_path / "root-link"
         root_link.symlink_to(target, target_is_directory=True)
-        self.assertClientError(lambda: WorkspaceFiles(root_link))
+        self.assertClientError(lambda: WorkspaceFiles(root_link, self.access))
 
     def test_symlinked_root_ancestor_is_rejected(self):
         parent = self.temp_path / "parent"
@@ -158,7 +162,7 @@ class WorkspaceFilesTests(unittest.TestCase):
         parent_link = self.temp_path / "parent-link"
         parent_link.symlink_to(parent, target_is_directory=True)
 
-        self.assertClientError(lambda: WorkspaceFiles(parent_link / "workspace"))
+        self.assertClientError(lambda: WorkspaceFiles(parent_link / "workspace", self.access))
 
     def test_nested_symlinks_are_not_read_or_exposed(self):
         outside = self.temp_path / "outside.txt"

@@ -168,7 +168,7 @@ class _Parser(argparse.ArgumentParser):
 def main(argv: list[str] | None = None) -> int:
     parser = _Parser(
         prog="dotunnel claude-token",
-        description="Run `claude setup-token` and save the issued long-lived token to a private file for Claude cli-jobs",
+        description="Run `claude setup-token` and save the issued long-lived token to a private file for native CLI jobs",
     )
     parser.add_argument("--output", type=Path, required=True, help="Absolute token file path outside the MCP workspace")
     parser.add_argument("--claude", type=Path, help="Claude CLI executable (default: claude on PATH)")

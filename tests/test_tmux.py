@@ -284,11 +284,13 @@ class SyntheticTmux:
             path=self.project_path,
             connections=(name,),
             profiles=("omp",),
+            allowed_actions=frozenset(("read", "start", "prompt", "answer")),
+            profile_actions={"omp": frozenset(("start", "prompt", "answer"))},
         )
         self.profile = Profile(
             id="omp",
             kind="omp",
-            executable=Path(sys.executable),
+            executable=Path(sys.executable).resolve(),
             args=(str(self.agent_script), "--profile", "registered", "--label", "雪"),
             backends=("tmux",),
             input_mode="bracketed-paste",
@@ -534,7 +536,7 @@ class TmuxBackendTests(unittest.IsolatedAsyncioTestCase):
         self.first.profile = Profile(
             id="omp",
             kind="omp",
-            executable=Path(sys.executable),
+            executable=Path(sys.executable).resolve(),
             args=(str(agent_script), str(protected_path)),
             backends=("tmux",),
             input_mode="bracketed-paste",
@@ -626,7 +628,7 @@ class TmuxBackendTests(unittest.IsolatedAsyncioTestCase):
         self.first.profile = Profile(
             id="omp",
             kind="omp",
-            executable=Path(sys.executable),
+            executable=Path(sys.executable).resolve(),
             args=(str(agent_script), str(missing_cwd)),
             backends=("tmux",),
             input_mode="bracketed-paste",
@@ -744,6 +746,7 @@ class TmuxBackendTests(unittest.IsolatedAsyncioTestCase):
         config_path = self.root / "readonly-config.json"
         config_path.write_text(json.dumps({
             "root": str(self.first.project_path),
+            "file_access": {"read": [], "write": []},
             "tasks": [],
             "supervision": {
                 "state_dir": str(self.root / "readonly-state"),
@@ -759,6 +762,8 @@ class TmuxBackendTests(unittest.IsolatedAsyncioTestCase):
                     "path": str(self.first.project_path),
                     "connections": [self.first.connection.id],
                     "profiles": [],
+                    "allowed_actions": ["read"],
+                    "profile_actions": {},
                 }],
                 "profiles": [],
             },

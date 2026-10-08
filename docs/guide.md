@@ -68,13 +68,31 @@ Run setup in a real interactive terminal:
 
 Use a new directory for a new Tunnel or key. Setup asks for the Tunnel ID and accepts the existing runtime key through hidden terminal input; it does not put the key in argv, the profile or the workspace. It creates private configuration, profile and key files (directories mode 0700, files mode 0600) and a separate workspace. Keep custom paths out of version control too. The setup directory and parents of client/CLI executables and auth references must have trusted ownership and must not be writable by untrusted users; symlinks and unsafe parents are refused.
 
-Setup checks the official client's configuration doctor, then offers an optional foreground connection only after explicit confirmation. A successful configuration doctor is not remote authentication. If started, setup waits up to 45 seconds for live/ready health and a successful control-plane poll; if authenticated readiness is not reached, it stops only the client it started. Otherwise it reports not connected. It may then guide you through [registering the app in ChatGPT](https://chatgpt.com/plugins) with the same Tunnel ID. Never enter the runtime key in ChatGPT; select the Tunnel connection and provide the Tunnel ID. Keep setup interactive. Cancelling or failing can leave private files in place, so retry with a new directory. Setup creates no service or autostart.
+Setup checks the official client's configuration doctor, then offers an optional foreground connection only after explicit confirmation. A successful configuration doctor is not remote authentication. If started, setup waits up to 45 seconds for live/ready health and a successful control-plane poll; if authenticated readiness is not reached, it stops only the client it started. Otherwise it reports not connected. It may then guide you through [registering the app in ChatGPT](https://chatgpt.com/plugins) with the same Tunnel ID. Never enter the runtime key in ChatGPT; select the Tunnel connection and provide the Tunnel ID. Keep setup interactive. Canceling the final permission review creates no files; a later failure may leave private files, so check the final status and inspect reported paths before retrying. Setup creates no service or autostart.
 
-Re-running setup with an existing directory only configures optional CLI integrations; it does not read or overwrite the key or profile. To configure a new Tunnel/key, use a new directory. Only one active stdio client is supported per Tunnel ID.
+Re-running `dotunnel setup` with an existing directory reviews the workspace, MCP file-access rules and optional fixed-job/live-supervision selections. It reuses existing key and profile references without reading or displaying the key value. Before editing an existing setup, it requires the matching local Tunnel client to be known stopped and a separate operator confirmation that no other local or remote client is using that Tunnel; setup does not stop or restart existing clients or services. Saved permissions take effect when a new MCP server process starts.
+
+### Integrated permission review (0.1.6)
+
+Setup drafts the workspace, MCP file rules, selected fixed CLI jobs and optional live-supervision grants before creating new private artifacts. The final review shows the actual paths, read/write rules, fixed-job source/editable sets, live project/profile actions, executable metadata and retained task commands. The final `[y/N]` approval defaults to No: pressing Enter cancels without requesting a key or changing files. The key value is not printed in the review.
+
+If new live supervision needs a state directory, its initialization has a separate default-No confirmation. Initialization creates state only: it does not start an agent or approve a runtime scope. After approval, setup prepares private references and job artifacts, validates the complete registry, then atomically publishes the setup configuration last. The saved permissions are used by a newly started MCP server, not a process already running.
+
+After saving, setup runs the local Tunnel-client doctor. Starting the Tunnel connection is a separate default-No foreground choice, and requires another explicit confirmation that no other local or remote client is active for that Tunnel. Setup does not run a native model/CLI or create or restart a service.
+
+Read the final status on errors instead of assuming an all-or-nothing rollback. Before configuration publication, the old configuration remains authoritative, but setup may report private files that were attempted or remain; inspect those exact paths and follow its retry instructions. Once it reports the configuration saved, a doctor or startup/readiness failure does not roll it back. If foreground startup/readiness is uncertain, a client may have started; check its status before trying again.
 
 ### Existing profile migration
 
 Package updates do not rewrite profiles made by v0.1.0–v0.1.2. Before starting one with v0.1.3 or later, edit the trusted `profile.yaml` command in `mcp.commands[].command`: insert `-I` between the absolute Python interpreter and `-m dotunnel`. Keep the interpreter, config path, Tunnel ID and key reference unchanged. New setups already generate the isolated command.
+
+### Existing setup and permission migration
+
+**0.1.6 upgrade boundary:** `dotunnel serve` rejects an older config that lacks `file_access`; installing the package does not make that config usable. Keep a private backup, stop the owned client, review and migrate the existing setup, then restart only after the saved config validates. For a manually maintained config outside a setup directory, explicitly add the reviewed file rules and supervision project/profile actions using the documented schema before restarting; do not run the setup wizard against an unrelated directory or recreate existing state/key references.
+
+Package installation alone does not migrate an existing setup. Run interactive `dotunnel setup --directory PATH` for the existing setup and review its full draft. Setup refuses to update while the matching local Tunnel client is active or its ownership/state cannot be established; stop the owned client yourself and rerun it. It also requires a separate default-No attestation that no other local or remote client uses the Tunnel, which a local process check cannot prove. Missing or unsafe existing supervision state is not silently recreated or rotated.
+
+Legacy configurations without `file_access` are converted to explicit `tree .` read and write rules, preserving their former whole-workspace access rather than narrowing it on upgrade. The prompt to keep existing read/write rules defaults to Yes; answer No to enter narrower paths. Otherwise the final summary shows the full-tree grants, and only approving that summary saves them. Existing supervision permissions are translated into explicit project ceilings and per-profile actions; they are not automatically cleared. A legacy live profile without `executable_policy` asks you to select `compatible` or `strict` (Enter selects `compatible`); select `strict` to retain the former writable/multiple-link executable metadata checks.
 
 ## 4. Diagnose, update and disconnect
 
@@ -85,6 +103,28 @@ Package updates do not rewrite profiles made by v0.1.0–v0.1.2. Before starting
 ## 5. Workspace, tasks and MCP tools
 
 Setup creates the initial workspace and config. For manual configuration, start from [`config.example.json`](../config.example.json), keep the config outside the workspace, and set `root` to an existing absolute workspace path. The config must be a private regular file owned by the runtime account; symlinks, hardlinks and group/world write access are refused. The root cannot be `/`, the account's home, or overlap the program/config paths; ancestor symlinks and unknown/duplicate fields are rejected.
+
+### MCP file-access rules
+
+From 0.1.6, `file_access` explicitly limits the four MCP file tools. A new setup starts with both `read` and `write` empty; selecting a workspace does not grant access to its contents. Rules use workspace-relative paths and `kind` `file` for one exact file or `tree` for a directory and all descendants, including files created later. For example:
+
+```json
+{
+  "root": "/srv/example/workspace",
+  "file_access": {
+    "read": [
+      {"path": "src", "kind": "tree"},
+      {"path": "README.md", "kind": "file"}
+    ],
+    "write": [
+      {"path": "src/change.py", "kind": "file"}
+    ]
+  },
+  "tasks": []
+}
+```
+
+Every write rule must be contained within the read rules. `list_files` and `search_files` follow the read policy too: they omit inaccessible entries, names and matches; an ancestor may be traversed only to reach an allowed path. Existing restrictions on hidden/credential paths, links and special files still apply. These rules do not restrict administrator-defined `tasks`, fixed CLI jobs or live agents, which have separate execution boundaries.
 
 `tasks: []` grants no command execution. Each administrator-defined task has a name, a description, an absolute `argv[0]` outside the workspace, fixed arguments, a workspace-relative `cwd` and a timeout (60 seconds by default, at most 300 seconds). At most 50 tasks can be registered. Callers choose only a task name; they cannot change its arguments, environment, shell, working directory or timeout. Review the executable, code and side effects before registration: fixed tasks run with the full OS permissions of the MCP account, and a workspace is not an OS sandbox.
 
@@ -108,9 +148,11 @@ Call `run_task(name)` once, save its `result_id`, then poll `get_task_result(res
 
 CLI jobs are disabled unless an operator explicitly registers them. They add no MCP tools and setup registration alone does not run a model or prove provider login. The native Codex, Claude Code or OMP CLI and its provider access must be installed/configured separately. `dotunnel setup` detects safe launchers on `PATH` without running them. Optional jobs require non-root Linux and usable `/usr/bin/bwrap` (Bubblewrap); the core Tunnel, file tools and fixed tasks do not. Bubblewrap creates mount/PID namespaces, drops capabilities and exposes only an allowlisted candidate at `/workspace`, with a separate `/home/job`; setup checks that namespaces work, not just that the executable exists. If Bubblewrap is missing, setup may offer installation when sudo appears available; if installed but unusable, kernel/AppArmor policy must allow unprivileged namespaces (reinstalling will not fix it). On shared servers, prefer an administrator installing the system package while keeping the runtime account non-sudo. You may skip integrations and configure them later.
 
-An operator-owned config fixes each backend's runtime, auth references, source root (separate from the MCP workspace), target aliases, file allowlist and editable subset outside the writable workspace. `review` is read-only; `edit` may change only existing allowlisted files. Jobs copy approved files into an isolated candidate, never apply changes to originals, run tests, commit/push or offer arbitrary shell. The task registry is updated as a whole; deselecting a backend removes only its setup-owned task. Auth references are read-only, but the native CLI runs as the same user and can read them. Provider networking is shared, so credentials are not hidden from the CLI and egress is not blocked. Do not allowlist secrets; selected source/instructions/results may reach ChatGPT through the provider.
+An operator-owned config fixes each backend's runtime, auth references, source root (separate from the MCP workspace), target aliases, file allowlist and editable subset outside the writable workspace. `review` is read-only; `edit` may change only existing allowlisted files in the isolated candidate. This source/editable selection is distinct from MCP `file_access`: neither grant implies the other. Jobs never apply changes to originals, run tests, commit/push or offer arbitrary shell. The task registry is updated as a whole; deselecting a backend removes only its setup-owned task. The native CLI runs as the same user, can read referenced credentials and shares provider networking. Do not allowlist secrets; selected source/instructions/results may be sent to the provider. These fixed jobs use the Bubblewrap candidate boundary; live Herdr/tmux agents in section 7 do not and retain native OS filesystem/authentication authority.
 
 Write only `{ "target": "alias", "mode": "review", "instruction": "..." }` to the configured request file, then call the registered `run_task` once and poll its result. `target` must be registered, `mode` is `review` or `edit`, and `instruction` is at most 8 KiB of UTF-8. Do not overwrite a running request. A target has at most 32 regular files, each at most 64 KiB. Set the MCP task timeout to cover the 200-second native limit plus cleanup (for example, 240 seconds). The native run captures at most 1 MiB. The result points to a report and SHA-256-addressed diff chunks (at most 48 KiB each); read and verify those artifacts. `candidate_ready` means only that a candidate was prepared, not that it was applied or correct; reports say `verification: not_run`.
+
+When setup registers a fixed job, its request-control file is a separate exact-file MCP read/write grant. Setup shows those paths for explicit approval; it does not add broad workspace access to make request files writable.
 
 - **Codex** requires a compatible native app-server installation with experimental `dynamicTools`/Code Mode and effective-feature queries, plus its `codex-code-mode-host` companion. Incompatible installations are refused; there is no `exec` or shell fallback.
 - **Claude Code** requires a long-lived token from `claude setup-token`, not the normal `/login` credential. `dotunnel claude-token --output PATH` creates a new private token file interactively; existing files are not replaced unless `--replace` is requested. The token is passed to the isolated process as `CLAUDE_CODE_OAUTH_TOKEN`, not argv or a mount. The same-UID Claude process can read it, so revoke and replace a leaked token. Claude runs with `--safe-mode --restricted` and fixed file tools; host settings, hooks, plugins, skills, MCP servers and sessions are not mounted.
@@ -120,13 +162,16 @@ Native execution failures return `status: failed`, `error_code: NATIVE_FAILED` a
 
 ## 7. Optional Herdr/tmux agent supervision
 
-Supervision is disabled unless a trusted `dotunnel` configuration contains a fixed `supervision` registry and its state is explicitly initialized. It can use configured Herdr sessions, tmux sockets, or both (up to four connections total). Projects bind canonical paths to allowed connections and profiles; profiles bind a CLI kind to an absolute executable and fixed arguments. Callers cannot supply a cwd, executable, arguments or environment. This feature is available in `0.1.5`; installing or updating the package does not configure or activate it.
+Supervision is disabled unless a trusted `dotunnel` configuration contains a fixed `supervision` registry and its state is explicitly initialized. It can use configured Herdr sessions, tmux sockets, or both (up to four connections total). Projects bind canonical paths to allowed connections and profiles; profiles bind a CLI kind to an absolute executable and fixed arguments. Callers cannot supply a cwd, executable, arguments or environment. Supervision is available in 0.1.5; from 0.1.6, interactive setup can configure it alongside explicit action permissions. Package installation or update alone does not activate it.
 
 The base [`config.example.json`](../config.example.json) intentionally stays minimal. This is a complete, syntactically valid illustrative configuration; replace the anonymous sample paths with your own trusted absolute paths. The Herdr and tmux backends may coexist in the same `connections` list when each is explicitly configured.
+
+Live profiles use `executable_policy: "compatible"` by default; `strict` is selectable. Compatible mode can admit a group/world-writable or multiply hard-linked leaf executable, so another writer or link sharer may change code run with the live agent's native filesystem and authentication authority. This is an accepted tampering risk, not a security guarantee. Strict restores the leaf executable's writable-mode and multiple-link refusals; ownership, parent-path, symlink, regular-file, executable and set-ID checks remain in force either way. This setting applies only to live supervision profiles, not the fixed Bubblewrap jobs in section 6, and does not grant any agent action.
 
 ```json
 {
   "root": "/srv/example/workspace",
+  "file_access": {"read": [], "write": []},
   "tasks": [],
   "supervision": {
     "state_dir": "/srv/example/state/supervision",
@@ -144,7 +189,9 @@ The base [`config.example.json`](../config.example.json) intentionally stays min
         "id": "example-project",
         "path": "/srv/example/project",
         "connections": ["tmux-example"],
-        "profiles": ["omp"]
+        "profiles": ["omp"],
+        "allowed_actions": [],
+        "profile_actions": {"omp": []}
       }
     ],
     "profiles": [
@@ -152,6 +199,7 @@ The base [`config.example.json`](../config.example.json) intentionally stays min
         "id": "omp",
         "kind": "omp",
         "executable": "/usr/local/bin/omp",
+        "executable_policy": "compatible",
         "args": [],
         "backends": ["tmux"],
         "input_mode": "bracketed-paste"
@@ -210,6 +258,8 @@ The registered common API has exactly eight tools:
 | `agent_prompt(target, observation, text, operation_id)` | Rechecks the handle, current identity, approval and fresh observation before sending literal text (up to 8 KiB) |
 | `agent_answer(target, observation, keys, operation_id)` | Sends up to eight explicitly selected lowercase keys: `enter`, `esc`, `up`, `down`, `left`, `right`, `tab`, `y`, `n`, or `1`–`9` |
 | `agent_wait(target, observation, timeout_seconds=60)` | Waits for a bounded change and returns a fresh observation; maximum wait is 110 seconds |
+
+New project grants use `projects[].allowed_actions` as a ceiling: it may contain `read`, `start`, `prompt` and `answer`. `projects[].profile_actions` separately lists the `start`, `prompt` and `answer` actions allowed for each profile; each profile's actions must fit inside the project ceiling, and `prompt`/`answer` also require project `read`. New grants start empty. A setup-time grant does not by itself approve a runtime scope: `agent_approve` remains a separate approval for the exact `connection_id:project_id`. Runtime approval cannot add an action omitted from the project or profile configuration, and neither kind of agent permission is an MCP file-access grant.
 
 `agent_approve` and `agent_revoke` scopes are exactly `connection_id:project_id`
 and bind the active configuration generation. This is an operator mistake guard,

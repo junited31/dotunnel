@@ -68,13 +68,31 @@ setup 전에 OS/architecture에 맞는 공식 [tunnel-client](https://github.com
 
 새 Tunnel이나 key는 새 디렉터리에 설정하세요. setup은 Tunnel ID를 묻고 기존 runtime key를 숨김 터미널 입력으로 받습니다. key를 argv, profile, workspace에 넣지 않습니다. private config/profile/key 파일과 분리된 workspace를 만들며 디렉터리는 mode 0700, 파일은 mode 0600입니다. 사용자 지정 경로도 버전 관리에서 제외하세요. setup 디렉터리와 client/CLI 실행 파일·인증 참조 경로의 상위 디렉터리는 신뢰할 수 있는 소유권이어야 하며 신뢰할 수 없는 사용자가 쓸 수 없어야 합니다. symlink와 안전하지 않은 상위 경로는 거부됩니다.
 
-setup은 공식 client의 설정 doctor를 확인한 뒤 명시적으로 동의할 때만 선택적 foreground 연결을 시작합니다. 설정 doctor 성공은 원격 인증 성공이 아닙니다. 실행을 선택하면 최대 45초 동안 live/ready health와 성공한 control-plane poll을 기다립니다. 인증 readiness가 없으면 setup이 시작한 client만 중지합니다. 이후 같은 Tunnel ID로 [ChatGPT 앱 등록](https://chatgpt.com/plugins)을 안내할 수 있습니다. ChatGPT에는 runtime key를 입력하지 말고 Tunnel 연결을 선택해 Tunnel ID를 지정하세요. 대화형 입력을 유지하세요. 취소나 오류 뒤에도 private 파일이 남을 수 있으므로 재시도에는 새 디렉터리를 쓰세요. 서비스나 자동 시작은 만들지 않습니다.
+setup은 공식 client의 설정 doctor를 확인한 뒤 명시적으로 동의할 때만 선택적 foreground 연결을 시작합니다. 설정 doctor 성공은 원격 인증 성공이 아닙니다. 실행을 선택하면 최대 45초 동안 live/ready health와 성공한 control-plane poll을 기다립니다. 인증 readiness가 없으면 setup이 시작한 client만 중지합니다. 이후 같은 Tunnel ID로 [ChatGPT 앱 등록](https://chatgpt.com/plugins)을 안내할 수 있습니다. ChatGPT에는 runtime key를 입력하지 말고 Tunnel 연결을 선택해 Tunnel ID를 지정하세요. 대화형 입력을 유지하세요. 최종 권한 검토에서 취소하면 파일을 만들지 않으며, 승인 뒤 오류가 나면 private 파일이 남을 수 있습니다. 재시도 전 마지막 상태 메시지와 표시된 경로를 확인하세요. 서비스나 자동 시작은 만들지 않습니다.
 
-기존 디렉터리에서 setup을 다시 실행하면 선택 CLI 연동만 설정하며 key/profile은 읽거나 덮어쓰지 않습니다. 새 Tunnel/key에는 새 디렉터리를 사용하세요. Tunnel ID 하나에는 stdio client 하나만 활성화할 수 있습니다.
+기존 디렉터리에서 `dotunnel setup`을 다시 실행하면 workspace, MCP 파일 접근 규칙과 선택 CLI/live-supervision 설정을 함께 검토합니다. 기존 key와 profile 참조를 재사용하며 key 값은 읽거나 출력하지 않습니다. 기존 설정을 바꾸려면 일치하는 로컬 Tunnel client가 중지된 것을 확인해야 하고, 같은 Tunnel을 사용하는 다른 로컬·원격 client가 없다는 운영자 확인도 별도로 필요합니다. setup은 기존 다른 client나 서비스를 중지·재시작하지 않습니다. 저장한 권한은 새 MCP 서버 프로세스부터 적용됩니다.
+
+### 통합 권한 검토 (0.1.6)
+
+setup은 workspace, MCP 파일 규칙, 선택한 고정 CLI 작업과 선택 live-supervision 권한을 draft로 구성한 뒤 새 private artifact를 만들기 전에 표시합니다. 최종 요약에는 경로, read/write 규칙, 고정 작업의 source/editable 범위, live project/profile action, 실행 파일 metadata, 유지되는 task 명령이 포함됩니다. 마지막 `[y/N]` 승인은 기본값이 No입니다. Enter를 누르면 key 입력이나 파일 변경 없이 취소됩니다. key 값은 요약에 출력하지 않습니다.
+
+새 live supervision에 state directory가 필요하면 초기화 여부를 별도 기본 No로 확인합니다. 초기화는 state만 만들며 agent를 시작하거나 runtime scope를 승인하지 않습니다. 승인 후 private 참조와 작업 artifact를 준비하고 전체 registry를 검증한 다음 setup config를 마지막에 atomic publish합니다. 저장된 권한은 실행 중인 서버가 아니라 새 MCP 서버 프로세스에서 사용됩니다.
+
+저장 후 setup은 로컬 Tunnel-client doctor를 실행합니다. Tunnel 연결 시작은 별도 기본 No foreground 선택이며, 해당 Tunnel을 쓰는 다른 로컬·원격 client가 없다는 명시 확인도 다시 필요합니다. setup은 native model/CLI를 실행하거나 서비스를 생성·재시작하지 않습니다.
+
+오류가 나면 전체 rollback을 가정하지 말고 마지막 상태 메시지를 확인하세요. config publish 전에는 기존 설정이 권한 기준으로 남지만 setup이 시도했거나 남아 있을 수 있는 private 파일 경로를 표시할 수 있습니다. 해당 경로를 확인하고 안내된 방법으로 재시도하세요. config가 저장됐다고 표시된 뒤 doctor나 startup/readiness가 실패해도 설정은 되돌려지지 않습니다. foreground startup/readiness가 불확실하면 client가 시작됐을 수 있으므로 재시도 전에 상태를 확인하세요.
 
 ### 기존 profile migration
 
 v0.1.0–v0.1.2에서 만든 profile은 패키지 업데이트가 수정하지 않습니다. v0.1.3 이상으로 시작하기 전에 trusted `profile.yaml`의 `mcp.commands[].command`에서 절대 Python 경로와 `-m dotunnel` 사이에 `-I`를 넣으세요. interpreter, config 경로, Tunnel ID, key 참조는 유지합니다. 새 setup은 이미 격리 명령을 만듭니다.
+
+### 기존 설정 및 권한 migration
+
+**0.1.6 업그레이드 경계:** `file_access`가 없는 구 설정은 `dotunnel serve`가 거부합니다. 패키지 설치만으로 해당 설정이 사용 가능해지지 않습니다. private backup을 보관하고 소유한 client를 중지한 뒤 기존 setup의 권한을 검토·migration하고, 저장된 config 검증 후 재시작하세요. setup directory 밖에서 수동 관리하는 config는 재시작 전에 문서화된 schema에 따라 검토한 파일 규칙과 supervision project/profile action을 명시하세요. 관련 없는 directory에 wizard를 실행하거나 기존 state/key 참조를 새로 만들지 마세요.
+
+패키지 설치만으로 기존 setup을 migration하지 않습니다. 기존 설정에 대화형 `dotunnel setup --directory PATH`를 실행해 전체 draft를 검토하세요. 해당 로컬 Tunnel client가 실행 중이거나 소유권/상태를 확인할 수 없으면 setup은 수정을 거부합니다. 직접 소유한 client를 중지한 뒤 다시 실행하세요. 같은 Tunnel을 사용하는 다른 로컬·원격 client가 없다는 별도 기본 No 확인도 필요하며, 로컬 process 검사만으로 이를 증명할 수는 없습니다. 없거나 안전하지 않은 기존 supervision state를 자동 생성·회전하지 않습니다.
+
+`file_access`가 없는 legacy 설정은 기존 전체 workspace 접근을 줄이지 않도록 `tree .` read 및 write 규칙으로 변환됩니다. 기존 read/write 규칙을 유지할지 묻는 항목은 기본값이 Yes입니다. 더 좁은 경로를 입력하려면 No를 선택하세요. 그렇지 않으면 최종 요약에 전체 tree 권한이 표시되며 요약을 승인해야 저장됩니다. 기존 supervision 권한은 project 상한과 profile별 action으로 명시적으로 변환되며 자동으로 비우지 않습니다. `executable_policy`가 없는 legacy live profile은 `compatible` 또는 `strict`를 선택하도록 묻고, Enter는 `compatible`입니다. 이전 writable/multiple-link 실행 파일 metadata 거부를 유지하려면 `strict`를 선택하세요.
 
 ## 4. 진단, 업데이트와 연결 해제
 
@@ -85,6 +103,28 @@ v0.1.0–v0.1.2에서 만든 profile은 패키지 업데이트가 수정하지 �
 ## 5. Workspace, 작업과 MCP 도구
 
 setup이 초기 workspace와 config를 만듭니다. 직접 구성할 때는 [`config.example.json`](../config.example.json)에서 시작하고 config를 workspace 밖에 둔 뒤 `root`를 존재하는 절대 workspace 경로로 지정하세요. config는 실행 계정 소유의 private regular file이어야 합니다. symlink, hardlink, group/world 쓰기는 거부됩니다. root에는 `/`, 실행 계정 home, 프로그램/config 경로를 사용할 수 없습니다. 상위 symlink, 중복/알 수 없는 필드도 거부됩니다.
+
+### MCP 파일 접근 규칙
+
+0.1.6부터 `file_access`가 네 MCP 파일 도구의 범위를 명시합니다. 새 setup의 `read`와 `write`는 모두 비어 있으며 workspace를 선택해도 내부 파일 접근 권한이 생기지 않습니다. 규칙은 workspace 기준 상대 경로이며 `kind: "file"`은 정확한 파일 하나, `kind: "tree"`는 해당 디렉터리와 이후 생성되는 파일을 포함한 모든 하위 경로입니다. 예:
+
+```json
+{
+  "root": "/srv/example/workspace",
+  "file_access": {
+    "read": [
+      {"path": "src", "kind": "tree"},
+      {"path": "README.md", "kind": "file"}
+    ],
+    "write": [
+      {"path": "src/change.py", "kind": "file"}
+    ]
+  },
+  "tasks": []
+}
+```
+
+모든 write 규칙은 read 허용 범위 안에 있어야 합니다. `list_files`와 `search_files`도 read 정책을 따르므로 허용되지 않은 entry·이름·match를 반환하지 않습니다. 허용 경로에 도달하기 위한 ancestor는 탐색에만 쓰일 수 있습니다. 숨김/credential 경로, link와 특수 파일에 대한 기존 제한은 그대로 적용됩니다. 이 규칙은 관리자가 정의한 `tasks`, 고정 CLI 작업이나 live agent를 제한하지 않습니다. 각각 별도 실행 경계를 가집니다.
 
 초기 `tasks: []`는 명령 실행 권한을 주지 않습니다. 관리자가 등록하는 작업은 이름, 설명, workspace 밖 절대 `argv[0]`, 고정 인자, workspace 기준 상대 `cwd`, timeout을 사용합니다(기본 60초, 최대 300초). 최대 50개까지 등록할 수 있습니다. 호출자는 작업 이름만 선택하며 인자, 환경, shell, 디렉터리, timeout을 바꿀 수 없습니다. 등록 전에 실행 파일·코드·side effect를 검토하세요. 고정 작업은 MCP 계정의 전체 OS 권한으로 실행되며 workspace는 OS sandbox가 아닙니다.
 
@@ -108,9 +148,11 @@ Supervision은 별도 선택 API입니다. 기존 file/task 도구 일곱 개는
 
 운영자가 명시적으로 등록하지 않으면 CLI 작업은 비활성화되어 있습니다. MCP 도구를 추가하지 않으며 등록만으로 모델을 실행하거나 provider 로그인을 검증하지 않습니다. Codex, Claude Code 또는 OMP native CLI와 provider 접근은 별도 설치·설정이 필요합니다. `dotunnel setup`은 PATH의 안전한 launcher를 실행하지 않고 탐지합니다. 선택 작업에는 non-root Linux와 사용 가능한 `/usr/bin/bwrap`(Bubblewrap)이 필요합니다. 기본 Tunnel, 파일 도구와 고정 작업에는 필요하지 않습니다. Bubblewrap은 mount/PID namespace를 만들고 capability를 제거하며 allowlist candidate만 `/workspace`에 제공하고 `/home/job`을 별도 HOME으로 씁니다. setup은 실행 파일 존재뿐 아니라 namespace 생성도 확인합니다. Bubblewrap이 없고 sudo 사용이 가능해 보이면 setup이 설치를 제안할 수 있습니다. 설치됐지만 사용할 수 없으면 kernel/AppArmor 정책이 비특권 namespace를 허용해야 하며 재설치로 해결되지 않습니다. 공유 서버에서는 실행 계정에 sudo를 주는 대신 관리자가 시스템 패키지를 설치하세요. 연동을 건너뛰고 나중에 설정할 수 있습니다.
 
-운영자 config는 각 backend의 runtime, 인증 참조, MCP workspace와 분리된 source root, target 별칭, 허용 파일과 editable subset을 writable workspace 밖에서 고정합니다. `review`는 읽기 전용이며 `edit`는 allowlist에 있는 기존 파일만 변경할 수 있습니다. 작업은 허용 파일을 격리 candidate에 복사하며 원본에 자동 반영하거나 테스트·commit/push·임의 shell을 실행하지 않습니다. 작업 registry는 전체 선택을 검증한 뒤 교체하며 해제 시 setup이 관리하는 해당 task만 제거합니다. 인증 참조는 읽기 전용이지만 native CLI는 같은 사용자로 실행되어 이를 읽을 수 있습니다. provider 네트워크도 공유하므로 CLI에서 credential을 숨기거나 외부 통신을 차단하지 않습니다. setup은 provider 인증 성공을 증명하지 않습니다. 비밀 파일을 허용하지 마세요. 선택 source·instruction·결과는 provider를 통해 ChatGPT로 전달될 수 있습니다.
+운영자 config는 각 backend의 runtime, 인증 참조, MCP workspace와 분리된 source root, target 별칭, 허용 파일과 editable subset을 writable workspace 밖에서 고정합니다. `review`는 읽기 전용이며 `edit`는 격리 candidate 안의 허용된 기존 파일만 바꿀 수 있습니다. 이 source/editable 선택은 MCP `file_access`와 별개이며 한쪽 권한이 다른 쪽 권한을 뜻하지 않습니다. 작업은 원본을 자동 수정하거나 테스트·commit/push·임의 shell을 실행하지 않습니다. task registry는 전체 선택을 검증한 뒤 교체하며 해제 시 setup이 관리하는 해당 task만 제거합니다. native CLI는 같은 사용자로 실행되어 참조 credential을 읽을 수 있고 provider 네트워크도 공유합니다. 비밀 파일을 허용하지 마세요. 선택 source·instruction·결과는 provider를 통해 전송될 수 있습니다. 고정 작업은 Bubblewrap candidate 경계를 사용하지만 7절의 live Herdr/tmux agent는 이를 사용하지 않고 native OS 파일·인증 권한을 가집니다.
 
 설정한 request 파일에 `{ "target": "alias", "mode": "review", "instruction": "..." }`만 기록하고 등록 작업의 `run_task`를 한 번 호출한 뒤 결과를 조회합니다. `target`은 등록된 별칭, `mode`는 `review`/`edit`, `instruction`은 UTF-8 최대 8 KiB입니다. 실행 중 request 파일을 덮어쓰지 마세요. target당 최대 32개 regular file, 파일당 64 KiB입니다. MCP task timeout은 정리 시간을 포함해 native 200초 제한보다 길게 설정하세요(예: 240초). native 출력 캡처는 최대 1 MiB입니다. 결과가 가리키는 report와 최대 48 KiB의 SHA-256 주소형 diff 조각을 읽고 검증하세요. `candidate_ready`는 candidate가 준비됐다는 뜻일 뿐 적용이나 정확성을 뜻하지 않습니다. report의 `verification`은 `not_run`입니다.
+
+고정 작업을 setup에 등록하면 request control file마다 별도의 정확한 MCP file read/write 규칙을 확인합니다. setup은 승인할 경로를 표시하며 request 파일을 위해 workspace 전체 권한을 추가하지 않습니다.
 
 - **Codex**에는 experimental `dynamicTools`/Code Mode와 effective-feature 조회를 지원하는 호환 native app-server 설치본, `codex-code-mode-host` companion이 필요합니다. 호환되지 않으면 거부하며 `exec`나 shell로 우회하지 않습니다.
 - **Claude Code**에는 일반 `/login` credential이 아닌 `claude setup-token`의 장기 토큰이 필요합니다. `dotunnel claude-token --output PATH`로 대화형 private 토큰 파일을 새로 만들며 `--replace`를 지정하지 않으면 기존 파일을 덮어쓰지 않습니다. 토큰은 argv나 mount가 아니라 격리 프로세스의 `CLAUDE_CODE_OAUTH_TOKEN`으로 전달됩니다. 같은 UID의 Claude가 읽을 수 있으므로 토큰이 유출되면 폐기하고 교체하세요. Claude는 `--safe-mode --restricted`와 고정 파일 도구로 실행되며 host 설정, hooks, plugins, skills, MCP server, session을 mount하지 않습니다.
@@ -120,13 +162,16 @@ native 실행 실패는 `status: failed`, `error_code: NATIVE_FAILED`와 허용�
 
 ## 7. 선택 Herdr/tmux agent supervision
 
-trusted `dotunnel` config에 고정 `supervision` registry를 넣고 상태를 명시적으로 초기화해야 기능이 활성화됩니다. 설정한 Herdr session, tmux socket 또는 두 backend를 함께 사용할 수 있으며 connection은 최대 네 개입니다. Project는 canonical path와 허용 connection/profile을 고정하고 profile은 CLI 종류, 절대 실행 파일, 고정 인자를 지정합니다. 호출자는 cwd, 실행 파일, 인자나 환경을 전달할 수 없습니다. 이 기능은 `0.1.5`에 포함되며 패키지 설치나 업데이트만으로 설정되거나 활성화되지는 않습니다.
+trusted `dotunnel` config에 고정 `supervision` registry를 넣고 상태를 명시적으로 초기화해야 기능이 활성화됩니다. 설정한 Herdr session, tmux socket 또는 두 backend를 함께 사용할 수 있으며 connection은 최대 네 개입니다. Project는 canonical path와 허용 connection/profile을 고정하고 profile은 CLI 종류, 절대 실행 파일, 고정 인자를 지정합니다. 호출자는 cwd, 실행 파일, 인자나 환경을 전달할 수 없습니다. Supervision은 `0.1.5`부터 제공되며, `0.1.6`부터 대화형 setup이 이를 명시적 action 권한과 함께 구성할 수 있습니다. 패키지 설치나 업데이트만으로 활성화되지는 않습니다.
 
 기본 [`config.example.json`](../config.example.json)은 의도적으로 최소 설정만 담습니다. 아래는 익명 sample 경로를 사용한 완전하고 문법적으로 유효한 config 예시입니다. 실제 trusted absolute path로 바꾸세요. Herdr와 tmux를 각각 명시적으로 설정하면 같은 `connections` 목록에서 함께 사용할 수 있습니다.
+
+Live profile의 `executable_policy` 기본값은 `compatible`이며 `strict`를 선택할 수 있습니다. Compatible은 group/world 쓰기 가능하거나 hard link가 여러 개인 leaf 실행 파일을 허용할 수 있어 다른 작성자나 link 공유자가 live agent의 native 파일·인증 권한으로 실행되는 코드를 바꿀 수 있습니다. 이는 수용한 변조 위험이며 보안 보장이 아닙니다. Strict는 leaf 실행 파일의 writable mode와 다중 link를 다시 거부합니다. 소유권, 상위 경로, symlink, regular/executable file, set-ID 검사 등 나머지 검사는 두 정책에서 모두 적용됩니다. 이 설정은 6절 고정 Bubblewrap 작업이 아닌 live supervision profile에만 적용되며 agent action을 허용하지 않습니다.
 
 ```json
 {
   "root": "/srv/example/workspace",
+  "file_access": {"read": [], "write": []},
   "tasks": [],
   "supervision": {
     "state_dir": "/srv/example/state/supervision",
@@ -144,7 +189,9 @@ trusted `dotunnel` config에 고정 `supervision` registry를 넣고 상태를 �
         "id": "example-project",
         "path": "/srv/example/project",
         "connections": ["tmux-example"],
-        "profiles": ["omp"]
+        "profiles": ["omp"],
+        "allowed_actions": [],
+        "profile_actions": {"omp": []}
       }
     ],
     "profiles": [
@@ -152,6 +199,7 @@ trusted `dotunnel` config에 고정 `supervision` registry를 넣고 상태를 �
         "id": "omp",
         "kind": "omp",
         "executable": "/usr/local/bin/omp",
+        "executable_policy": "compatible",
         "args": [],
         "backends": ["tmux"],
         "input_mode": "bracketed-paste"
@@ -210,6 +258,8 @@ receipt로 승격하지 않습니다. 잘못되거나 안전하지 않은 stagin
 | `agent_prompt(target, observation, text, operation_id)` | 전송 전에 handle, 현재 identity, 승인과 최신 observation 재확인; literal text 최대 8 KiB |
 | `agent_answer(target, observation, keys, operation_id)` | 명시 선택한 소문자 key 최대 8개 전달: `enter`, `esc`, `up`, `down`, `left`, `right`, `tab`, `y`, `n`, `1`–`9` |
 | `agent_wait(target, observation, timeout_seconds=60)` | 제한된 상태 변화를 기다리고 새 observation 반환; 최대 110초 |
+
+새 project 권한에서 `projects[].allowed_actions`는 `read`, `start`, `prompt`, `answer`로 구성되는 상한입니다. `projects[].profile_actions`는 profile마다 허용할 `start`, `prompt`, `answer`를 별도로 지정하며 각 profile 권한은 project 상한 안에 있어야 합니다. `prompt`/`answer`에는 project `read`도 필요합니다. 새 권한은 모두 비어 있는 상태로 시작합니다. setup 시 선택한 action만으로 runtime scope가 승인되지는 않습니다. 정확한 `connection_id:project_id`의 `agent_approve`는 별도 승인입니다. Runtime 승인도 project/profile config에 없는 action을 추가할 수 없으며, 어느 live 권한도 MCP file 접근 권한이 아닙니다.
 
 `agent_approve`와 `agent_revoke` scope는 정확히 `connection_id:project_id`이며
 현재 config generation에 묶입니다. 이는 운영 실수를 막는 승인이지 사람 인증이

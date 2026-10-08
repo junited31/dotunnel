@@ -7,7 +7,7 @@ import os
 import re
 import stat
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -90,9 +90,31 @@ class Project:
     path: Path
     connections: tuple[str, ...]
     profiles: tuple[str, ...]
+    allowed_actions: frozenset[str] = frozenset()
+    profile_actions: Mapping[str, frozenset[str]] = field(default_factory=dict)
     workspaces: tuple[str, ...] = ()
     protected: bool = False
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "allowed_actions", frozenset(self.allowed_actions))
+        object.__setattr__(
+            self,
+            "profile_actions",
+            MappingProxyType({profile: frozenset(actions) for profile, actions in self.profile_actions.items()}),
+        )
+
+    def allows(self, action: str, profile_id: str | None = None) -> bool:
+        if action == "read":
+            return "read" in self.allowed_actions
+        if (
+            action not in _PROFILE_MUTATIONS
+            or profile_id is None
+            or profile_id not in self.profiles
+            or action not in self.allowed_actions
+            or (action in ("prompt", "answer") and "read" not in self.allowed_actions)
+        ):
+            return False
+        return action in self.profile_actions.get(profile_id, ())
 
 @dataclass(frozen=True)
 class Profile:
@@ -102,11 +124,12 @@ class Profile:
     args: tuple[str, ...] = ()
     backends: tuple[str, ...] = ("herdr", "tmux")
     input_mode: str = "bracketed-paste"
-
+    executable_policy: str = "compatible"
 
 @dataclass(frozen=True)
 class SupervisionSettings:
     state_dir: Path
+    workspace_root: Path
     connections: Mapping[str, Connection]
     projects: Mapping[str, Project]
     profiles: Mapping[str, Profile]
@@ -129,6 +152,8 @@ _PID = re.compile(r"[0-9]{1,20}\Z")
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
 _BACKENDS = frozenset(("herdr", "tmux"))
 _KINDS = frozenset(("omp", "claude", "codex"))
+_PROJECT_ACTIONS = frozenset(("read", "start", "prompt", "answer"))
+_PROFILE_MUTATIONS = frozenset(("start", "prompt", "answer"))
 
 
 def _invalid(reason: str) -> SupervisionError:
@@ -158,6 +183,12 @@ def _unique_ids(value: object, reason: str) -> tuple[str, ...]:
     if len(items) != len(set(items)):
         raise _invalid(reason)
     return items
+
+def _action_set(value: object, allowed: frozenset[str], reason: str) -> frozenset[str]:
+    items = _list(value, reason)
+    if any(not isinstance(item, str) or item not in allowed for item in items) or len(items) != len(set(items)):
+        raise _invalid(reason)
+    return frozenset(items)
 
 
 def _path_value(value: object, reason: str) -> Path:
@@ -214,6 +245,52 @@ def _trusted_directory(path: Path, *, allow_missing: bool = False, private_final
     os.close(fd)
     return path
 
+def _trusted_future_directory(path: Path, *, setup_directory: Path | None = None) -> Path:
+    """Validate a future directory without creating it or following links."""
+    if not path.is_absolute() or ".." in path.parts or path == Path("/") or not path.name:
+        raise _invalid("unsafe_directory")
+    if setup_directory is not None:
+        setup_directory = Path(setup_directory)
+        if not setup_directory.is_absolute() or ".." in setup_directory.parts or not setup_directory.name:
+            raise _invalid("unsafe_directory")
+    if setup_directory is not None and path.parent == setup_directory:
+        parent_fd = _open_trusted_directory(setup_directory.parent)
+        try:
+            try:
+                directory_fd = os.open(
+                    setup_directory.name,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=parent_fd,
+                )
+            except FileNotFoundError:
+                return path
+            except OSError:
+                raise _invalid("unsafe_directory") from None
+            try:
+                _check_directory_owner(os.fstat(directory_fd), os.getuid(), final=True)
+                try:
+                    os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    return path
+                except OSError:
+                    raise _invalid("unsafe_directory") from None
+                raise _invalid("future_directory_exists")
+            finally:
+                os.close(directory_fd)
+        finally:
+            os.close(parent_fd)
+    parent_fd = _open_trusted_directory(path.parent)
+    try:
+        try:
+            os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return path
+        except OSError:
+            raise _invalid("unsafe_directory") from None
+        raise _invalid("future_directory_exists")
+    finally:
+        os.close(parent_fd)
+
 
 def _check_directory_owner(info: os.stat_result, uid: int, *, final: bool) -> None:
     if not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, uid):
@@ -226,7 +303,9 @@ def _check_directory_owner(info: os.stat_result, uid: int, *, final: bool) -> No
 
 
 
-def _trusted_executable(path: Path, root: Path) -> Path:
+def _trusted_executable(path: Path, root: Path, *, policy: str = "strict") -> Path:
+    if not isinstance(policy, str) or policy not in ("compatible", "strict"):
+        raise _invalid("invalid_executable_policy")
     if not path.is_absolute() or ".." in path.parts or _overlaps(path, root):
         raise _invalid("unsafe_executable_path")
     try:
@@ -241,16 +320,15 @@ def _trusted_executable(path: Path, root: Path) -> Path:
         info = os.fstat(fd)
         if (
             not stat.S_ISREG(info.st_mode)
-            or info.st_nlink != 1
             or info.st_uid not in (0, os.getuid())
-            or info.st_mode & (stat.S_ISUID | stat.S_ISGID | 0o022)
-            or not info.st_mode & 0o111
+            or info.st_mode & (stat.S_ISUID | stat.S_ISGID)
+            or not (info.st_mode & 0o111)
+            or (policy == "strict" and (info.st_nlink != 1 or bool(info.st_mode & 0o022)))
         ):
             raise _invalid("unsafe_executable")
     finally:
         os.close(fd)
     return path
-
 
 def _canonical(path: Path) -> Path:
     try:
@@ -347,12 +425,32 @@ def _parse_connection(item: object, root: Path) -> tuple[Connection, str]:
 
 
 def _parse_project(item: object) -> Project:
-    value = _keys(item, {"id", "path", "connections", "profiles"}, {"workspaces", "protected"})
+    value = _keys(
+        item,
+        {"id", "path", "connections", "profiles", "allowed_actions", "profile_actions"},
+        {"workspaces", "protected"},
+    )
     project_id = _identifier(value["id"])
     path = _path_value(value["path"], "invalid_project_path")
     _trusted_directory(path)
     connections = _unique_ids(value["connections"], "invalid_project_connections")
     profiles = _unique_ids(value["profiles"], "invalid_project_profiles")
+    allowed_actions = _action_set(value["allowed_actions"], _PROJECT_ACTIONS, "invalid_project_actions")
+    raw_profile_actions = value["profile_actions"]
+    if not isinstance(raw_profile_actions, dict):
+        raise _invalid("invalid_project_profile_actions")
+    profile_actions: dict[str, frozenset[str]] = {}
+    for profile_id, actions_value in raw_profile_actions.items():
+        if not isinstance(profile_id, str) or profile_id not in profiles:
+            raise _invalid("unknown_project_profile_action")
+        actions = _action_set(actions_value, _PROFILE_MUTATIONS, "invalid_profile_actions")
+        if not actions <= allowed_actions:
+            raise _invalid("profile_action_outside_project_ceiling")
+        profile_actions[profile_id] = actions
+    if "read" not in allowed_actions and any(
+        action in actions for actions in profile_actions.values() for action in ("prompt", "answer")
+    ):
+        raise _invalid("profile_input_requires_read")
     raw_workspaces = value.get("workspaces", [])
     workspaces = _string_list(raw_workspaces, "invalid_project_workspaces", maximum=256)
     if any(not _WORKSPACE.fullmatch(workspace) for workspace in workspaces):
@@ -360,16 +458,23 @@ def _parse_project(item: object) -> Project:
     protected = value.get("protected", False)
     if not isinstance(protected, bool):
         raise _invalid("invalid_project_protection")
-    return Project(project_id, _canonical(path), connections, profiles, workspaces, protected)
+    return Project(project_id, _canonical(path), connections, profiles, allowed_actions, profile_actions, workspaces, protected)
 
 
 def _parse_profile(item: object, root: Path) -> Profile:
-    value = _keys(item, {"id", "kind", "executable"}, {"args", "backends", "input_mode"})
+    value = _keys(
+        item, {"id", "kind", "executable"}, {"args", "backends", "input_mode", "executable_policy"}
+    )
     profile_id = _identifier(value["id"])
     kind = value["kind"]
     if not isinstance(kind, str) or kind not in _KINDS:
         raise _invalid("invalid_profile_kind")
-    executable = _trusted_executable(_path_value(value["executable"], "invalid_executable_path"), root)
+    executable_policy = value.get("executable_policy", "compatible")
+    if not isinstance(executable_policy, str) or executable_policy not in ("compatible", "strict"):
+        raise _invalid("invalid_executable_policy")
+    executable = _trusted_executable(
+        _path_value(value["executable"], "invalid_executable_path"), root, policy=executable_policy
+    )
     args = _string_list(value.get("args", []), "invalid_profile_args", maximum=64)
     raw_backends = value.get("backends", ["herdr", "tmux"])
     backends = _unique_ids(raw_backends, "invalid_profile_backends")
@@ -378,16 +483,21 @@ def _parse_profile(item: object, root: Path) -> Profile:
     input_mode = value.get("input_mode", "bracketed-paste")
     if input_mode != "bracketed-paste":
         raise _invalid("unsupported_input_mode")
-    return Profile(profile_id, kind, executable, args, backends, input_mode)
+    return Profile(profile_id, kind, executable, args, backends, input_mode, executable_policy)
 
 
-def parse_supervision(value: object, root: Path, config_path: Path) -> SupervisionSettings:
+def _parse_supervision(
+    value: object, root: Path, config_path: Path, *, future_root: bool
+) -> SupervisionSettings:
     section = _keys(value, {"state_dir", "connections", "projects", "profiles"}, {"default_connection", "protected_paths"})
     root = Path(root)
     config_path = Path(config_path)
     if not root.is_absolute() or not config_path.is_absolute() or ".." in root.parts or ".." in config_path.parts:
         raise _invalid("invalid_parent_paths")
-    _trusted_directory(root)
+    if future_root:
+        _trusted_future_directory(root, setup_directory=config_path.parent)
+    else:
+        _trusted_directory(root)
     state_dir = _path_value(section["state_dir"], "invalid_state_directory")
     _trusted_directory(state_dir, allow_missing=True, private_final=True)
     if _overlaps(state_dir, root) or _canonical(config_path).is_relative_to(_canonical(state_dir)):
@@ -475,13 +585,22 @@ def parse_supervision(value: object, root: Path, config_path: Path) -> Supervisi
             for item in connections.values()
         ],
         "projects": [
-            {"id": item.id, "path": str(item.path), "connections": item.connections,
-             "profiles": item.profiles, "workspaces": item.workspaces, "protected": item.protected}
+            {
+                "id": item.id, "path": str(item.path), "connections": item.connections,
+                "profiles": item.profiles, "allowed_actions": sorted(item.allowed_actions),
+                "profile_actions": {
+                    profile: sorted(item.profile_actions.get(profile, ())) for profile in sorted(item.profiles)
+                },
+                "workspaces": item.workspaces, "protected": item.protected,
+            }
             for item in projects.values()
         ],
         "profiles": [
-            {"id": item.id, "kind": item.kind, "executable": str(item.executable), "args": item.args,
-             "backends": item.backends, "input_mode": item.input_mode}
+            {
+                "id": item.id, "kind": item.kind, "executable": str(item.executable), "args": item.args,
+                "backends": item.backends, "input_mode": item.input_mode,
+                "executable_policy": item.executable_policy,
+            }
             for item in profiles.values()
         ],
         "protected_paths": [str(path) for path in protected_paths],
@@ -496,7 +615,17 @@ def parse_supervision(value: object, root: Path, config_path: Path) -> Supervisi
         protected_paths=protected_paths,
         default_connection=default_connection,
         generation=generation,
+        workspace_root=_canonical(root),
     )
+
+def parse_supervision(value: object, root: Path, config_path: Path) -> SupervisionSettings:
+    return _parse_supervision(value, root, config_path, future_root=False)
+
+
+def _parse_setup_draft_supervision(
+    value: object, root: Path, config_path: Path
+) -> SupervisionSettings:
+    return _parse_supervision(value, root, config_path, future_root=True)
 
 
 def protected(path: str | Path, settings: SupervisionSettings) -> bool:

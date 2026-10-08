@@ -53,16 +53,20 @@ checksum을 검증하세요. 계정 권한, Tunnel ID, Restricted runtime key도
 "$HOME/.local/share/dotunnel/venv/bin/dotunnel" setup --directory "$HOME/.dotunnel-setup"
 ```
 
-setup은 private profile/config와 입력한 key를 별도 workspace 밖에 저장합니다.
-workspace는 `tasks: []`로 시작합니다. 계정 격리, private 설치와 ChatGPT 연결은
-[상세 안내](docs/guide.ko.md)를 참고하세요.
+setup은 private profile/config/key를 workspace 밖에 저장합니다. 0.1.6부터
+대화형 setup에서 MCP 파일 도구가 읽거나 쓸 workspace 경로도 선택합니다.
+두 규칙 목록은 비어 있는 상태로 시작하며 write 권한은 read 허용 범위를
+넘을 수 없습니다. key 입력이나 생성 파일보다 먼저 권한 요약을 확인하고
+명시적으로 승인해야 합니다. Tunnel 연결 시작과 live-agent scope 승인은
+별도 선택입니다. [상세 안내](docs/guide.ko.md#3-private-secure-mcp-tunnel-설정)를
+참고하세요.
 
 ## 명령
 
 | 명령 | 용도 |
 |---|---|
 | `dotunnel help` | 사용법 표시 |
-| `dotunnel setup` | Tunnel 설정 생성 또는 선택 CLI 연동 설정 |
+| `dotunnel setup` | workspace 파일 접근과 선택 CLI/supervision 권한 검토 |
 | `dotunnel doctor` | 설정·client·연결 상태 읽기 전용 진단 |
 | `dotunnel update` | 최신 안정 release 확인 후 대화형 업데이트 |
 | `dotunnel serve --config PATH` | trusted config로 stdio MCP 서버 실행 |
@@ -71,12 +75,15 @@ workspace는 `tasks: []`로 시작합니다. 계정 격리, private 설치와 Ch
 ## 선택 Herdr/tmux agent supervision
 
 trusted config에 고정 `supervision` registry를 넣고 private 상태를 명시적으로
-초기화해야 supervision이 활성화됩니다. 두 backend 중 하나 또는 둘 다 설정해도
-공통 `agent_*` 도구 여덟 개만 추가되므로 MCP 도구는 총 15개입니다. 고정
-project와 profile이 사용할 수 있는 connection을 제한합니다. Herdr session과
-tmux socket은 함께 등록할 수 있습니다. 기본 connection은 새 시작에만 사용하며
-broadcast나 자동 fallback을 허용하지 않습니다. 승인, handle, receipt와 identity
-제한은 [상세 안내](docs/guide.ko.md#7-선택-herdrtmux-agent-supervision)를 참고하세요.
+초기화해야 supervision이 활성화됩니다. 활성화하면 공통 `agent_*` 도구
+여덟 개가 추가되어 총 15개입니다. 0.1.6부터 대화형 setup에서 project action
+상한과 profile별 `start`/`prompt`/`answer` 권한을 선택할 수 있습니다. 새 권한은
+비어 있는 상태로 시작하며 setup 승인만으로 runtime scope 승인이나 agent 시작이
+되지는 않습니다. live profile의 기본 실행 파일 정책은 `compatible`이며
+쓰기 가능하거나 hard link가 공유된 실행 코드도 허용할 수 있습니다. `strict`를
+선택할 수 있습니다. live agent는 고정 CLI 작업의 Bubblewrap candidate 경계가
+아니라 native OS 권한을 사용합니다. Scope와 identity 제한은
+[상세 안내](docs/guide.ko.md#7-선택-herdrtmux-agent-supervision)를 참고하세요.
 
 [0.1.5](https://github.com/junited31/dotunnel/releases/tag/v0.1.5)에 포함됩니다.
 패키지 설치만으로 supervision이 설정되거나 활성화되지는 않습니다.
@@ -99,14 +106,19 @@ supervision은 별도 기능으로 설정된 Herdr/tmux backend를 지원하며 
 - root가 아닌 계정으로 실행하세요. 광범위한 그룹·sudo가 없는 전용 계정을
   권장합니다. 프로젝트는 계정을 만들거나 권한을 변경하지 않습니다.
 - 설치 프로그램, trusted 설정/credential, writable workspace를 분리하세요.
-  초기 `tasks: []`이며 credential은 workspace 밖에 저장됩니다.
+  초기 `tasks: []`이며 MCP read/write 규칙도 비어 있습니다. credential은
+  workspace 밖에 저장됩니다.
 - 고정 작업은 MCP 실행 계정의 전체 OS 권한으로 실행됩니다. 고정 명령이나
   workspace는 sandbox가 아니므로 코드와 side effect를 검토하세요.
 - stdio MCP에는 별도 사용자 인증이 없습니다. 접근 주체를 제한하고 허용 파일과
   작업 결과에 민감 정보가 없는지 확인하세요.
-- 선택 CLI 작업에는 Bubblewrap이 필요합니다. native CLI는 같은 사용자로 실행되어
-  참조 credential을 읽을 수 있고 허용 내용은 provider로 전송될 수 있습니다.
-  candidate는 자동 적용·검증되지 않습니다.
+- 선택 고정 CLI 작업에는 Bubblewrap이 필요하며 allowlist candidate 복사본을
+  사용합니다. 수정은 source에 자동 적용되지 않습니다. native CLI는 같은
+  사용자로 실행되어 참조 credential을 읽을 수 있고 provider 네트워크도 공유합니다.
+- Live Herdr/tmux agent는 이 Bubblewrap candidate 경계를 사용하지 않습니다.
+  native agent의 OS 파일 및 인증 권한을 그대로 가지며 MCP 파일 규칙이 이를
+  제한하지 않습니다. Compatible live 실행 파일 정책은 쓰기 가능/shared-inode
+  코드 위험을 허용할 수 있으며 보안 보장이 아닙니다.
 - `curl | sh`는 저장소의 설치 스크립트를 현재 사용자 권한으로 실행합니다.
   스크립트를 신뢰·검토하세요. wheel checksum이 shell 스크립트까지 무조건
   신뢰해도 된다는 뜻은 아닙니다.

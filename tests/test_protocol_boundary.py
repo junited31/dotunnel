@@ -14,7 +14,7 @@ class ProtocolBoundaryTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def make_stdio_server(base, root, tasks):
         config = base / "config.json"
-        config.write_text(json.dumps({"root": str(root), "tasks": tasks}))
+        config.write_text(json.dumps({"root": str(root), "tasks": tasks, "file_access": {"read": [], "write": []}}))
         config.chmod(0o600)
         return StdioServerParameters(
             command=sys.executable,
@@ -183,6 +183,7 @@ class ProtocolBoundaryTests(unittest.IsolatedAsyncioTestCase):
             config = base / "config.json"
             config.write_text(json.dumps({
                 "root": str(root),
+                "file_access": {"read": [], "write": []},
                 "tasks": [{
                     "name": "probe", "description": "Synthetic side-effect probe",
                     "argv": [sys.executable, "-I", "-c", "from pathlib import Path; Path('executed').touch()"],

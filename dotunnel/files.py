@@ -4,6 +4,8 @@ import stat
 import threading
 from pathlib import Path
 
+from .file_access import FileAccess
+
 
 _FILE_LIMIT = 64 * 1024
 _PATH_LIMIT = 4096
@@ -160,7 +162,10 @@ class WorkspaceFiles:
     and no cross-process atomicity is provided.
     """
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, access):
+        if not isinstance(access, FileAccess):
+            raise ValueError("Invalid file access policy")
+        self._access = access
         self._root_fd = -1
         self._write_lock = threading.Lock()
         self._closed = True
@@ -264,6 +269,7 @@ class WorkspaceFiles:
 
     def list_files(self, path="."):
         components = _validate_components(path, allow_root=True)
+        self._access.require("browse", components)
         try:
             directory_fd = self._open_directory(components)
             try:
@@ -282,7 +288,13 @@ class WorkspaceFiles:
                         entry_type = self._entry_kind(directory_fd, name)
                         if entry_type is None:
                             continue
-                        entry_path = _relative_path((*components, name))
+                        child_components = (*components, name)
+                        if entry_type == "directory":
+                            if not self._access.browsable(child_components):
+                                continue
+                        elif not self._access.allows("read", child_components):
+                            continue
+                        entry_path = _relative_path(child_components)
                         if entry_path is None:
                             truncated = True
                             continue
@@ -309,6 +321,7 @@ class WorkspaceFiles:
 
     def read_file(self, path):
         components = _validate_components(path, allow_root=False)
+        self._access.require("read", components)
         try:
             parent_fd, name = self._open_parent(components)
             try:
@@ -336,6 +349,7 @@ class WorkspaceFiles:
 
     def search_files(self, query, path="."):
         components = _validate_components(path, allow_root=True)
+        self._access.require("browse", components)
         if not isinstance(query, str) or not query:
             raise ValueError("Search query must be non-empty text")
         if len(query) > _QUERY_LIMIT:
@@ -382,14 +396,15 @@ class WorkspaceFiles:
                         if entry_type is None:
                             continue
                         relative_components = (*directory_components, name)
+                        if entry_type == "directory":
+                            if self._access.browsable(relative_components):
+                                child_directories.append(relative_components)
+                            continue
+                        if entry_type != "file" or not self._access.allows("read", relative_components):
+                            continue
                         entry_path = _relative_path(relative_components)
                         if entry_path is None:
                             truncated = True
-                            continue
-                        if entry_type == "directory":
-                            child_directories.append(relative_components)
-                            continue
-                        if entry_type != "file":
                             continue
 
                         try:
@@ -488,6 +503,7 @@ class WorkspaceFiles:
             expected_sha256 = expected_sha256.lower()
 
         components = _validate_components(path, allow_root=False)
+        self._access.require("write", components)
         digest = hashlib.sha256(content_bytes).hexdigest()
         try:
             parent_fd, name = self._open_parent(components)

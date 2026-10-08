@@ -1,4 +1,5 @@
 {
   "root": "/srv/example/workspace",
+  "file_access": {"read": [], "write": []},
   "tasks": []
 }
