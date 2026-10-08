@@ -79,8 +79,8 @@ coexist; the default connection chooses a new start only and never enables
 broadcast or automatic fallback. See the [detailed guide](docs/guide.md#7-optional-herdrtmux-agent-supervision)
 for approvals, handles, receipts and identity limits.
 
-This supervision feature is unreleased source. The existing released wheel and
-installer pin remain unchanged.
+Available in [0.1.5](https://github.com/junited31/dotunnel/releases/tag/v0.1.5).
+Installing the package does not configure or activate supervision.
 
 ## Optional common adapter runner
 

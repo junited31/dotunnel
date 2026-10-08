@@ -78,8 +78,8 @@ tmux socket은 함께 등록할 수 있습니다. 기본 connection은 새 시�
 broadcast나 자동 fallback을 허용하지 않습니다. 승인, handle, receipt와 identity
 제한은 [상세 안내](docs/guide.ko.md#7-선택-herdrtmux-agent-supervision)를 참고하세요.
 
-이 supervision 기능은 아직 release되지 않은 source 변경입니다. 기존 공개
-wheel과 installer pin은 변경하지 않습니다.
+[0.1.5](https://github.com/junited31/dotunnel/releases/tag/v0.1.5)에 포함됩니다.
+패키지 설치만으로 supervision이 설정되거나 활성화되지는 않습니다.
 
 ## 선택 공통 adapter runner
 

@@ -18,7 +18,7 @@ front page의 한 줄 명령은 GitHub 로그인 없이 공개 저장소 `main`�
 
 ### 수동 설치
 
-내려받은 shell 스크립트를 실행하고 싶지 않다면 v0.1.4 release wheel을 직접 다운로드하세요. GitHub 로그인과 `gh`는 필요하지 않습니다. 설치 **전에** 기대하는 byte 수와 SHA-256을 모두 확인하세요.
+내려받은 shell 스크립트를 실행하고 싶지 않다면 v0.1.5 release wheel을 직접 다운로드하세요. GitHub 로그인과 `gh`는 필요하지 않습니다. 설치 **전에** 기대하는 byte 수와 SHA-256을 모두 확인하세요.
 
 ```sh
 set -eu
@@ -30,12 +30,12 @@ if [ -e "$install" ] || [ -L "$install" ]; then
 fi
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-wheel="$tmp/dotunnel-0.1.4-py3-none-any.whl"
+wheel="$tmp/dotunnel-0.1.5-py3-none-any.whl"
 curl --fail --location --output "$wheel" \
-  https://github.com/junited31/dotunnel/releases/download/v0.1.4/dotunnel-0.1.4-py3-none-any.whl
-test "$(wc -c < "$wheel")" -eq 80847
+  https://github.com/junited31/dotunnel/releases/download/v0.1.5/dotunnel-0.1.5-py3-none-any.whl
+test "$(wc -c < "$wheel")" -eq 123908
 printf '%s  %s\n' \
-  6ed19be1672ac3961f0e8230abd43af47c08eee4720ad2898b21d3ee6fc1af0f \
+  5b617552d1d9dbaabd4209a99f42c4a25e7757fad8c3e9a0e684d9f01a949810 \
   "$wheel" | sha256sum --check -
 python3 -I -m venv "$install"
 "$install/bin/python" -I -m pip --isolated install --only-binary :all: "$wheel"
@@ -120,7 +120,7 @@ native 실행 실패는 `status: failed`, `error_code: NATIVE_FAILED`와 허용�
 
 ## 7. 선택 Herdr/tmux agent supervision
 
-trusted `dotunnel` config에 고정 `supervision` registry를 넣고 상태를 명시적으로 초기화해야 기능이 활성화됩니다. 설정한 Herdr session, tmux socket 또는 두 backend를 함께 사용할 수 있으며 connection은 최대 네 개입니다. Project는 canonical path와 허용 connection/profile을 고정하고 profile은 CLI 종류, 절대 실행 파일, 고정 인자를 지정합니다. 호출자는 cwd, 실행 파일, 인자나 환경을 전달할 수 없습니다. 이 기능은 아직 release되지 않은 source이며 기존 공개 wheel과 installer pin은 변경하지 않습니다.
+trusted `dotunnel` config에 고정 `supervision` registry를 넣고 상태를 명시적으로 초기화해야 기능이 활성화됩니다. 설정한 Herdr session, tmux socket 또는 두 backend를 함께 사용할 수 있으며 connection은 최대 네 개입니다. Project는 canonical path와 허용 connection/profile을 고정하고 profile은 CLI 종류, 절대 실행 파일, 고정 인자를 지정합니다. 호출자는 cwd, 실행 파일, 인자나 환경을 전달할 수 없습니다. 이 기능은 `0.1.5`에 포함되며 패키지 설치나 업데이트만으로 설정되거나 활성화되지는 않습니다.
 
 기본 [`config.example.json`](../config.example.json)은 의도적으로 최소 설정만 담습니다. 아래는 익명 sample 경로를 사용한 완전하고 문법적으로 유효한 config 예시입니다. 실제 trusted absolute path로 바꾸세요. Herdr와 tmux를 각각 명시적으로 설정하면 같은 `connections` 목록에서 함께 사용할 수 있습니다.
 
