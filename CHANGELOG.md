@@ -1,7 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.1.5 (Unreleased)
 
+- Align package metadata and the public module version at `0.1.5` for release preparation. The existing `0.1.4` release assets and default installer pin remain unchanged until a separately reviewed post-publication pin update.
 - Add optional core Herdr/tmux supervision through an explicit fixed project/profile/connection registry. The base seven file/task tools stay unchanged; one shared set of eight `agent_*` tools is added only when enabled (15 total), with no broadcast or automatic fallback.
 - Require explicit `dotunnel supervision init/reinit` for owner-only state outside the writable root. Scope approval binds `connection_id:project_id` and the active configuration generation; opaque handles and fresh signed observations bind writes to current identity. Herdr may provide weak process identity, while tmux writes are limited to managed agents with recorded and rechecked native identity; exact existing pane registrations remain read-only.
 - Persist operation receipts and recovery diagnostics. Exact `operation_id` replay does not repeat effects, changed payloads conflict, and an `unknown` outcome or recovery record is never an actionable target or reason for blind retry. Bound status/screens, four-way CLI concurrency and operation deadlines.
