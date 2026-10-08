@@ -59,6 +59,11 @@ class SupervisionTests(unittest.IsolatedAsyncioTestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.base = Path(self.temporary.name)
+        agent_temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(agent_temporary.cleanup)
+        executable = Path(agent_temporary.name) / 'agent-cli'
+        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        executable.chmod(0o700)
         self.state = SupervisionState.initialize(self.base / 'state')
         self.addCleanup(self.state.close)
         connection = Connection('c', 'tmux', Path(sys.executable), socket=self.base / 'socket')
@@ -67,7 +72,7 @@ class SupervisionTests(unittest.IsolatedAsyncioTestCase):
             allowed_actions=frozenset(('read', 'start', 'prompt', 'answer')),
             profile_actions={'omp': frozenset(('start', 'prompt', 'answer'))},
         )
-        profile = Profile('omp', 'omp', Path(sys.executable).resolve())
+        profile = Profile('omp', 'omp', executable)
         self.settings = SupervisionSettings(
             state_dir=self.base / 'state',
             workspace_root=self.base,
