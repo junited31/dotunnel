@@ -1,8 +1,12 @@
 # Changelog
 
-## 0.1.5 (Unreleased)
+## Unreleased
 
-- Align package metadata and the public module version at `0.1.5` for release preparation. The existing `0.1.4` release assets and default installer pin remain unchanged until a separately reviewed post-publication pin update.
+- Advance the default installer and bilingual manual-install examples to the published `0.1.5` wheel, pinned to 123908 bytes and SHA-256 `5b617552d1d9dbaabd4209a99f42c4a25e7757fad8c3e9a0e684d9f01a949810`. Existing installations, services, credentials and `0.1.4` release assets remain unchanged.
+
+## 0.1.5 (2026-10-08)
+
+- Align package metadata and the public module version at `0.1.5`. Existing `0.1.4` release assets remain unchanged.
 - Add optional core Herdr/tmux supervision through an explicit fixed project/profile/connection registry. The base seven file/task tools stay unchanged; one shared set of eight `agent_*` tools is added only when enabled (15 total), with no broadcast or automatic fallback.
 - Require explicit `dotunnel supervision init/reinit` for owner-only state outside the writable root. Scope approval binds `connection_id:project_id` and the active configuration generation; opaque handles and fresh signed observations bind writes to current identity. Herdr may provide weak process identity, while tmux writes are limited to managed agents with recorded and rechecked native identity; exact existing pane registrations remain read-only.
 - Persist operation receipts and recovery diagnostics. Exact `operation_id` replay does not repeat effects, changed payloads conflict, and an `unknown` outcome or recovery record is never an actionable target or reason for blind retry. Bound status/screens, four-way CLI concurrency and operation deadlines.
@@ -16,7 +20,6 @@
 - Publish regression fixture PID and SIGKILL staging markers atomically, so readiness checks cannot observe incomplete diagnostic contents.
 - Add the separately installed `dotunnel-adapter-runner` common JSON-stdio runner with fixed private registry profiles, strict typed requests/reports, local per-operation consent, durable ownership/replay, and protected-project refusal. It uses the existing seven MCP tools and is not enabled by base setup.
 - Publish runner reports atomically without replacement, reserve the complete bounded history frame, and preserve unknown outcomes after admitted effects/signals/state failures. Its synthetic tests and installed CLI/PTy/MCP smoke cover consent, one-effect replay, stale/revoked/protected refusal and ambiguous recovery; the standalone runner ships no Herdr/Orca/tmux/provider adapters. Core Herdr/tmux supervision is separate, and Orca remains unavailable.
-- The existing released wheel and main installer pin remain unchanged; unified supervision is unreleased source.
 - Prepare stable-tag GitHub Release drafts through exact-source/main-CI validation, read-only wheel preparation and a separate narrowly privileged asset attachment job; publication remains manual.
 - Provide read-only manual release dry-runs, checksum/source manifests and release-specific fixed-pin installers without rewriting the main installer pin or existing Release assets.
 - Document the protected-main publication flow and the distinction between preparation verification and live draft/publication verification.

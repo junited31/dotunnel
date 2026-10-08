@@ -18,7 +18,7 @@ The public installer uses `$HOME/.local/share/dotunnel/venv` and exposes `$HOME/
 
 ### Manual installation
 
-To avoid executing a downloaded shell script, download the v0.1.4 release wheel directly. GitHub authentication and `gh` are not required. Check both the expected byte count and SHA-256 **before** installing:
+To avoid executing a downloaded shell script, download the v0.1.5 release wheel directly. GitHub authentication and `gh` are not required. Check both the expected byte count and SHA-256 **before** installing:
 
 ```sh
 set -eu
@@ -30,12 +30,12 @@ if [ -e "$install" ] || [ -L "$install" ]; then
 fi
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-wheel="$tmp/dotunnel-0.1.4-py3-none-any.whl"
+wheel="$tmp/dotunnel-0.1.5-py3-none-any.whl"
 curl --fail --location --output "$wheel" \
-  https://github.com/junited31/dotunnel/releases/download/v0.1.4/dotunnel-0.1.4-py3-none-any.whl
-test "$(wc -c < "$wheel")" -eq 80847
+  https://github.com/junited31/dotunnel/releases/download/v0.1.5/dotunnel-0.1.5-py3-none-any.whl
+test "$(wc -c < "$wheel")" -eq 123908
 printf '%s  %s\n' \
-  6ed19be1672ac3961f0e8230abd43af47c08eee4720ad2898b21d3ee6fc1af0f \
+  5b617552d1d9dbaabd4209a99f42c4a25e7757fad8c3e9a0e684d9f01a949810 \
   "$wheel" | sha256sum --check -
 python3 -I -m venv "$install"
 "$install/bin/python" -I -m pip --isolated install --only-binary :all: "$wheel"
@@ -120,7 +120,7 @@ Native execution failures return `status: failed`, `error_code: NATIVE_FAILED` a
 
 ## 7. Optional Herdr/tmux agent supervision
 
-Supervision is disabled unless a trusted `dotunnel` configuration contains a fixed `supervision` registry and its state is explicitly initialized. It can use configured Herdr sessions, tmux sockets, or both (up to four connections total). Projects bind canonical paths to allowed connections and profiles; profiles bind a CLI kind to an absolute executable and fixed arguments. Callers cannot supply a cwd, executable, arguments or environment. This is unreleased source; the existing released wheel and installer pin remain unchanged.
+Supervision is disabled unless a trusted `dotunnel` configuration contains a fixed `supervision` registry and its state is explicitly initialized. It can use configured Herdr sessions, tmux sockets, or both (up to four connections total). Projects bind canonical paths to allowed connections and profiles; profiles bind a CLI kind to an absolute executable and fixed arguments. Callers cannot supply a cwd, executable, arguments or environment. This feature is available in `0.1.5`; installing or updating the package does not configure or activate it.
 
 The base [`config.example.json`](../config.example.json) intentionally stays minimal. This is a complete, syntactically valid illustrative configuration; replace the anonymous sample paths with your own trusted absolute paths. The Herdr and tmux backends may coexist in the same `connections` list when each is explicitly configured.
 
