@@ -21,7 +21,7 @@ _HELP = """Usage: dotunnel <command> [options]
 
 Commands:
   help       Show this usage and command reference.
-  setup      Create a private Tunnel setup or reconfigure its CLI integrations.
+  setup      Review workspace, file access, fixed CLI tasks and live-agent permissions.
   update     Check GitHub Releases and ask Y/n before upgrading this virtualenv.
   doctor     Validate an existing setup and inspect local Tunnel/CLI readiness.
   supervision  Initialize or explicitly reinitialize private supervision state.
@@ -35,7 +35,7 @@ Engine commands (normally started by the Tunnel client or a registered task):
              Save a Claude long-lived token to a private file from an interactive terminal.
 
 Setup options:
-  --directory DIR       New private setup directory or existing setup for integration changes.
+  --directory DIR       New private setup or explicit permission migration of an existing setup.
   --tunnel-client PATH  Path to the separately installed client executable.
 
 Doctor options:

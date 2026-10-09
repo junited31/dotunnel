@@ -80,7 +80,7 @@ setup은 workspace, MCP 파일 규칙, 선택한 고정 CLI 작업과 선택 liv
 
 저장 후 setup은 로컬 Tunnel-client doctor를 실행합니다. Tunnel 연결 시작은 별도 기본 No foreground 선택이며, 해당 Tunnel을 쓰는 다른 로컬·원격 client가 없다는 명시 확인도 다시 필요합니다. setup은 native model/CLI를 실행하거나 서비스를 생성·재시작하지 않습니다.
 
-저장 후 다른 client가 없다는 확인이나 foreground 시작을 거절하면 client는 중지 상태로 두고 shell-quoted 수동 명령과 ChatGPT 등록 안내를 표시합니다. 수동 시작 전에도 같은 Tunnel을 사용하는 다른 client가 없음을 별도로 확인하세요. 기존 setup에서 알 수 없는 Tunnel ID를 `None`으로 출력하지 않습니다.
+저장 후 다른 client가 없다는 확인이나 foreground 시작을 거절하면 client는 중지 상태로 두고 shell-quoted 수동 명령과 ChatGPT 등록 안내를 표시합니다. 수동 명령은 shell의 임의 환경 변수를 상속하지 않고 `env -i`로 자동 foreground 시작과 같은 `HOME`, `PATH`, `LANG`을 지정합니다. 수동 시작 전에도 같은 Tunnel을 사용하는 다른 client가 없음을 별도로 확인하세요. 기존 setup에서 알 수 없는 Tunnel ID를 `None`으로 출력하지 않습니다.
 
 오류가 나면 전체 rollback을 가정하지 말고 마지막 상태 메시지를 확인하세요. config publish 전에는 기존 설정이 권한 기준으로 남지만 setup이 시도했거나 남아 있을 수 있는 private 파일 경로를 표시할 수 있습니다. 해당 경로를 확인하고 안내된 방법으로 재시도하세요. config가 저장됐다고 표시된 뒤 doctor나 startup/readiness가 실패해도 설정은 되돌려지지 않습니다. foreground startup/readiness가 불확실하면 client가 시작됐을 수 있으므로 재시도 전에 상태를 확인하세요.
 

@@ -80,7 +80,7 @@ If new live supervision needs a state directory, its initialization has a separa
 
 After saving, setup runs the local Tunnel-client doctor. Starting the Tunnel connection is a separate default-No foreground choice, and requires another explicit confirmation that no other local or remote client is active for that Tunnel. Setup does not run a native model/CLI or create or restart a service.
 
-If you decline the external-client attestation or foreground start after saving, setup leaves the client stopped and prints a shell-quoted manual command plus ChatGPT registration guidance. Before starting manually, independently confirm no other client uses that Tunnel. Existing setups do not print an unknown Tunnel ID as `None`.
+If you decline the external-client attestation or foreground start after saving, setup leaves the client stopped and prints a shell-quoted manual command plus ChatGPT registration guidance. The command uses `env -i` with the same `HOME`, `PATH` and `LANG` values as automatic foreground startup instead of inheriting arbitrary shell variables. Before starting manually, independently confirm no other client uses that Tunnel. Existing setups do not print an unknown Tunnel ID as `None`.
 
 Read the final status on errors instead of assuming an all-or-nothing rollback. Before configuration publication, the old configuration remains authoritative, but setup may report private files that were attempted or remain; inspect those exact paths and follow its retry instructions. Once it reports the configuration saved, a doctor or startup/readiness failure does not roll it back. If foreground startup/readiness is uncertain, a client may have started; check its status before trying again.
 

@@ -1823,8 +1823,6 @@ def main(argv: list[str] | None = None) -> int:
             updated_document,
             directory / _SETUP_CONFIG,
         )
-        reserved_names = set(TASK_NAMES.values())
-        general_tasks = [task for task in updated_tasks if task.get("name") not in reserved_names]
         key_reference = directory / _KEY_REFERENCE
         print(f"  Future private config: {directory / _SETUP_CONFIG} (atomic publication last)")
         print(
@@ -1833,7 +1831,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         permission_setup.print_summary(
             draft,
-            tasks=general_tasks,
+            tasks=updated_tasks,
             job_details=job_details,
             removed_jobs=removed_jobs,
             key_reference=key_reference,
@@ -2031,7 +2029,11 @@ def main(argv: list[str] | None = None) -> int:
         ):
             print("Setup was saved; the Tunnel client remains stopped.")
             print("Before starting manually, independently confirm no other client uses this Tunnel.")
-            manual_argv = [str(client), "run", "--profile-file", str(profile)]
+            manual_argv = [
+                "/usr/bin/env", "-i",
+                *(f"{name}={value}" for name, value in setup._environment().items()),
+                str(client), "run", "--profile-file", str(profile),
+            ]
             print(f"To start later in the foreground: {shlex.join(manual_argv)}")
             setup._registration(tunnel_id)
             return 0

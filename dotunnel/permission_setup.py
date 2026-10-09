@@ -371,7 +371,7 @@ def print_summary(draft: Draft, *, tasks: list[dict[str, Any]], job_details: lis
         print("  Runtime scope approvals and native confirmations remain separate.")
     else:
         print("  Live supervision: none selected; no agent actions are authorized")
-    print("  General tasks are preserved; argv and cwd are not constrained by MCP file_access.")
+    print("  Registered task commands (general tasks preserved; argv and cwd are not constrained by MCP file_access):")
     for task in tasks:
         print(f"    {task.get('name')}: argv={task.get('argv')} cwd={task.get('cwd', '.')} timeout={task.get('timeout_seconds', 60)}")
     print("  Saved permissions take effect only when a new MCP process starts.")
