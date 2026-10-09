@@ -38,6 +38,11 @@ class ReleaseVerifyCISupervisorTests(unittest.TestCase):
         sys.modules[name] = cls.supervisor
         cls.addClassCleanup(sys.modules.pop, name, None)
         spec.loader.exec_module(cls.supervisor)
+        python = Path("/usr/bin/python3").resolve(strict=True)
+        if not cls.supervisor._secure_executable(str(python)):
+            raise RuntimeError("trusted system watchdog Python is unavailable")
+        info = python.stat()
+        cls.watchdog_python_identity = (python, info.st_dev, info.st_ino)
 
     def test_supervisor_source_rejects_writable_ancestor(self):
         unsafe = self.fixture_root / "untrusted"
@@ -256,7 +261,7 @@ class ReleaseVerifyCISupervisorTests(unittest.TestCase):
                 "else:\n"
                 "    sys.stderr.write('unexpected synthetic Docker command\\n'); sys.exit(2)\n"
             )
-            docker.write_text("#!" + sys.executable + "\n" + script, encoding="utf-8")
+            docker.write_text("#!" + str(self.watchdog_python_identity[0]) + "\n" + script, encoding="utf-8")
             docker.chmod(0o700)
             healthy = {
                 "memory_available_bytes": 64 * 1024**3,
@@ -294,6 +299,7 @@ class ReleaseVerifyCISupervisorTests(unittest.TestCase):
                         "docker": {"dockerrootdir": str(home)},
                     }),
                     ("_image_preflight", (True, None, {})),
+                    ("_python_identity", self.watchdog_python_identity),
                     ("_watchdog_start", ReadyWatchdog()),
                     ("_wait_watchdog_ready", None),
                 ):
@@ -721,6 +727,7 @@ class ReleaseVerifyCISupervisorTests(unittest.TestCase):
                     ("_docker_binary", ("/synthetic/docker", None)),
                     ("probe", {"status": "AVAILABLE", "docker": {"dockerrootdir": str(home)}}),
                     ("_image_preflight", (True, None, {})),
+                    ("_python_identity", self.watchdog_python_identity),
                     ("_host_resources", {
                         "memory_available_bytes": 64 * 1024**3,
                         "disk_free_bytes": 64 * 1024**3,
