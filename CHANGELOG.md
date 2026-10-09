@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Add a standalone maintainer-only Linux verification supervisor with fixed Docker pilot limits, bounded SHA-256 input-tree admission rechecked across execution, independently inspected kernel controls, bounded output and ownership-checked cleanup. Monitor host resources through subprocess/readiness waits; missing telemetry or insufficient memory/disk headroom blocks execution and stays failed after transient recovery. Preserve original failures separately while owned cleanup continues.
+- Document the supervisor and the limits of prerequisite/unit-test evidence in both guides. Existing push/PR workflows, required checks, package version, installer pins, release publication and runtime permissions are unchanged.
+
 ## 0.1.6 (2026-10-09)
 
 - Integrate workspace file-access and optional CLI/live-agent permission selection into interactive setup. New MCP read and write rules start empty; exact-file and directory-tree rules are explicit, writes must remain within read access, and file listing/search respects the read rules.

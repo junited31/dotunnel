@@ -402,6 +402,24 @@ Inspect that run's summary and download its verification artifact. A dry-run ver
 
 Every prepared release includes its own fixed-pin installer. The front-page raw `main/install.sh` remains an independently reviewed pin: advancing it requires a separate ordinary PR using the exact released wheel's byte count and SHA, and does not happen automatically. Do not substitute a dry-run rebuild's checksum for the already published wheel's checksum.
 
+## 10. Maintainer verification supervisor
+
+`tools/release_verify/ci_supervisor.py` is a standalone, standard-library-only host tool. It is not installed with the wheel and is not an MCP tool. Existing push/PR CI, required checks, release publication and installation defaults are unchanged.
+
+Run only reviewed, trusted supervisor bytes. Candidate input cannot supply a command, image, mount, Docker option or resource limit. Inspect prerequisites without creating a container:
+
+```sh
+python3 -I tools/release_verify/ci_supervisor.py probe
+```
+
+The finite `pilot` command accepts only `--stage capabilities` or `--stage hostile-pilot`, an exclusive 32-character lowercase hexadecimal `--run-id`, and an optional immutable `--input-root`. Use a dedicated, authorized non-root Linux Docker host. Missing Docker, accounting, ownership or enforcement returns `BLOCKED`; do not install or relax prerequisites automatically.
+
+The trusted container policy fixes RAM at 512MiB, swap at zero, CPU at 50%, processes at 64, wall time at 180 seconds, writable scratch at 256MiB, stdout/stderr at 64KiB each, and the stop grace period at two seconds. Host admission additionally requires 8GiB available memory and 4GiB free disk on both the control and Docker-root filesystems. Execution stops on missing telemetry or below 6GiB memory / 2GiB disk; limits are not raised mid-run.
+
+Reviewed input admission includes a bounded SHA-256 tree manifest, rechecked before create/start/GO and after cleanup; a read-only mount alone does not prove unchanged host bytes. Runtime telemetry is checked during Docker command and readiness waits. A transient telemetry failure stays failed even if accounting recovers; exact owned cleanup still runs.
+
+A successful feasibility pilot requires independently inspected effective kernel limits and confirmed cleanup of its exact owned container, process tree and private control directory. Unit tests and a prerequisite probe do not establish Docker/bubblewrap confinement, installed CLI, SDK, live ChatGPT or native-agent success. Reports preserve the original failure separately from cleanup failures. No verification result publishes a release or grants production/provider access.
+
 ## Further reading
 
 - [Front page](../README.md) · [한국어 front page](../README.ko.md)
