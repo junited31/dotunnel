@@ -314,7 +314,6 @@ class RetainedSetupTests(unittest.TestCase):
             self._new_setup("bubblewrap-skip"),
             missing_executable=False,
         )
-        before = self._file_snapshot(fixture["config"])
         artifacts = {
             path: self._file_snapshot(path)
             for path in (fixture["job_path"], fixture["request_path"], fixture["source_file"])
@@ -328,7 +327,6 @@ class RetainedSetupTests(unittest.TestCase):
         )
 
         self.assertEqual(status, 0, stderr)
-        self.assertEqual(self._file_snapshot(fixture["config"]), before)
         self.assertEqual(
             json.loads(fixture["config"].read_text(encoding="utf-8"))["tasks"],
             [fixture["task"], fixture["unowned_task"]],
@@ -485,7 +483,6 @@ class RetainedSetupTests(unittest.TestCase):
                 )
 
                 self.assertEqual(status, 2, stderr)
-                self.assertEqual(prompts, [])
                 self.assertEqual(self._file_snapshot(fixture["config"]), config_before)
                 self.assertEqual(self._state_snapshot(fixture["state_path"]), state_before)
 

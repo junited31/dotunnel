@@ -80,7 +80,11 @@ setup은 workspace, MCP 파일 규칙, 선택한 고정 CLI 작업과 선택 liv
 
 저장 후 setup은 로컬 Tunnel-client doctor를 실행합니다. Tunnel 연결 시작은 별도 기본 No foreground 선택이며, 해당 Tunnel을 쓰는 다른 로컬·원격 client가 없다는 명시 확인도 다시 필요합니다. setup은 native model/CLI를 실행하거나 서비스를 생성·재시작하지 않습니다.
 
+저장 후 다른 client가 없다는 확인이나 foreground 시작을 거절하면 client는 중지 상태로 두고 shell-quoted 수동 명령과 ChatGPT 등록 안내를 표시합니다. 수동 시작 전에도 같은 Tunnel을 사용하는 다른 client가 없음을 별도로 확인하세요. 기존 setup에서 알 수 없는 Tunnel ID를 `None`으로 출력하지 않습니다.
+
 오류가 나면 전체 rollback을 가정하지 말고 마지막 상태 메시지를 확인하세요. config publish 전에는 기존 설정이 권한 기준으로 남지만 setup이 시도했거나 남아 있을 수 있는 private 파일 경로를 표시할 수 있습니다. 해당 경로를 확인하고 안내된 방법으로 재시도하세요. config가 저장됐다고 표시된 뒤 doctor나 startup/readiness가 실패해도 설정은 되돌려지지 않습니다. foreground startup/readiness가 불확실하면 client가 시작됐을 수 있으므로 재시도 전에 상태를 확인하세요.
+
+rename 이후 또는 rename 결과 자체가 불명확해 config 게시를 확인하지 못하면 준비한 참조 파일을 보존하고 새 연결을 시작하지 않았음을 알립니다. config가 이미 존재할 수 있으므로 재시도하거나 artifact를 삭제하기 전에 trusted identity와 참조 경로를 대조하세요. durability나 readback 검증 실패만으로 게시되지 않았다고 판단할 수 없습니다.
 
 ### 기존 profile migration
 
@@ -91,6 +95,8 @@ v0.1.0–v0.1.2에서 만든 profile은 패키지 업데이트가 수정하지 �
 **0.1.6 업그레이드 경계:** `file_access`가 없는 구 설정은 `dotunnel serve`가 거부합니다. 패키지 설치만으로 해당 설정이 사용 가능해지지 않습니다. private backup을 보관하고 소유한 client를 중지한 뒤 기존 setup의 권한을 검토·migration하고, 저장된 config 검증 후 재시작하세요. setup directory 밖에서 수동 관리하는 config는 재시작 전에 문서화된 schema에 따라 검토한 파일 규칙과 supervision project/profile action을 명시하세요. 관련 없는 directory에 wizard를 실행하거나 기존 state/key 참조를 새로 만들지 마세요.
 
 패키지 설치만으로 기존 setup을 migration하지 않습니다. 기존 설정에 대화형 `dotunnel setup --directory PATH`를 실행해 전체 draft를 검토하세요. 해당 로컬 Tunnel client가 실행 중이거나 소유권/상태를 확인할 수 없으면 setup은 수정을 거부합니다. 직접 소유한 client를 중지한 뒤 다시 실행하세요. 같은 Tunnel을 사용하는 다른 로컬·원격 client가 없다는 별도 기본 No 확인도 필요하며, 로컬 process 검사만으로 이를 증명할 수는 없습니다. 없거나 안전하지 않은 기존 supervision state를 자동 생성·회전하지 않습니다.
+
+setup 소유 native CLI task는 CLI가 없어졌거나 job 문서가 잘못됐어도 명시적으로 등록 해제할 수 있습니다. 제거는 기본 No이며 최종 draft 승인도 필요합니다. task 등록만 제거하고 기존 job/request 파일은 삭제하지 않습니다. 선택 Bubblewrap/integration 설정의 skip은 기존 작업의 선택 해제가 아닙니다. 기존 등록을 기본 유지하고 별도 제거 선택을 제공합니다. 유지할 job은 검토한 workspace 기준으로 검증합니다. 기존 supervision state는 읽기 전용으로 열고 게시 직전 authority identity를 다시 확인합니다. 없거나 손상·변경된 state는 저장을 거부하며 자동 생성·회전하지 않습니다.
 
 `file_access`가 없는 legacy 설정은 기존 전체 workspace 접근을 줄이지 않도록 `tree .` read 및 write 규칙으로 변환됩니다. 기존 read/write 규칙을 유지할지 묻는 항목은 기본값이 Yes입니다. 더 좁은 경로를 입력하려면 No를 선택하세요. 그렇지 않으면 최종 요약에 전체 tree 권한이 표시되며 요약을 승인해야 저장됩니다. 기존 supervision 권한은 project 상한과 profile별 action으로 명시적으로 변환되며 자동으로 비우지 않습니다. `executable_policy`가 없는 legacy live profile은 `compatible` 또는 `strict`를 선택하도록 묻고, Enter는 `compatible`입니다. 이전 writable/multiple-link 실행 파일 metadata 거부를 유지하려면 `strict`를 선택하세요.
 

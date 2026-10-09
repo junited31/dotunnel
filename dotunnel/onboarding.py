@@ -1702,6 +1702,7 @@ def main(argv: list[str] | None = None) -> int:
                 "Fixed native CLI jobs are unavailable; no chmod will be attempted."
             )
             available = {}
+        initial = set(active) & set(available)
         selection_skipped = False
 
         def mark_selection_skipped() -> None:
@@ -1779,7 +1780,7 @@ def main(argv: list[str] | None = None) -> int:
                 integrations._load_managed_job(
                     Path(detail["config"]),
                     backend,
-                    Path(detail["workspace"]),
+                    draft.workspace,
                     bwrap_path=_BWRAP,
                 )
                 job_details.append(detail)
@@ -2022,15 +2023,14 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as error:
             print(f"Setup was saved; connection start refused: {error}.", file=sys.stderr)
             return 2
-        if not _confirm_no_other_client(None):
-            print("Setup was saved; no connection was started without explicit external-client attestation.")
-            return 0
-        if not permission_setup.confirm(
+        external_client_attested = _confirm_no_other_client(None)
+        if not external_client_attested or not permission_setup.confirm(
             None,
             "Start the configured Tunnel client in this foreground terminal now? [y/N]: ",
             default=False,
         ):
             print("Setup was saved; the Tunnel client remains stopped.")
+            print("Before starting manually, independently confirm no other client uses this Tunnel.")
             manual_argv = [str(client), "run", "--profile-file", str(profile)]
             print(f"To start later in the foreground: {shlex.join(manual_argv)}")
             setup._registration(tunnel_id)
