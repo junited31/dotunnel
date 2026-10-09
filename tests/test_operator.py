@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 
 from unittest.mock import patch
+from dotunnel import integrations
 from dotunnel.operator import main
 
 
@@ -19,6 +20,20 @@ class OperatorTests(unittest.TestCase):
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             code = main(args)
         return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_setup_routes_to_public_onboarding_without_changing_command(self):
+        with patch("dotunnel.operator._supported_environment", return_value=True), patch(
+            "dotunnel.onboarding.main", return_value=17
+        ) as setup_main:
+            result = main(["setup", "--directory", "/tmp/fixture"])
+        self.assertEqual(result, 17)
+        setup_main.assert_called_once_with(["--directory", "/tmp/fixture"])
+
+    def test_serve_dispatch_remains_the_public_dotunnel_module(self):
+        with patch("dotunnel.serve.main", return_value=19) as serve_main:
+            result = main(["serve", "--config", "/tmp/fixture/config.json"])
+        self.assertEqual(result, 19)
+        serve_main.assert_called_once_with(["--config", "/tmp/fixture/config.json"])
 
     def test_no_command_points_to_help_without_entering_setup(self):
         code, stdout, stderr = self.invoke([])
@@ -54,17 +69,21 @@ class OperatorTests(unittest.TestCase):
         workspace = base / 'workspace'
         workspace.mkdir(mode=0o700)
         config = directory / 'config.json'
-        self.write_private(config, json.dumps({'root': str(workspace), 'tasks': tasks or []}) + '\n')
+        self.write_private(config, json.dumps({'root': str(workspace), 'file_access': {'read': [], 'write': []}, 'tasks': tasks or []}) + '\n')
         profile = directory / 'profile.yaml'
         self.write_private(profile, '{}\n')
         client = base / 'tunnel-client'
         self.write_private(client, '#!/usr/bin/env python3\nprint(\'{"result":"ok"}\')\n', 0o700)
         return directory, config, profile, client
 
-    def make_managed_cli_task(self, base, directory, backend):
+    def make_managed_cli_task(self, base, directory, backend, *, generation='fixture-generation'):
         launcher = base / 'dotunnel'
         self.write_private(launcher, '#!/usr/bin/env python3\nraise SystemExit(0)\n', 0o700)
-        job_config = directory / 'cli-jobs' / f'{backend}.json'
+        job_config = (
+            directory / 'cli-jobs' / f'{backend}.json'
+            if generation is None
+            else directory / 'native-cli' / generation / f'{backend}.json'
+        )
         task = {
             'name': f'dotunnel-{backend}',
             'description': f'{backend.title()} integration',
@@ -74,7 +93,7 @@ class OperatorTests(unittest.TestCase):
         }
         return task, job_config
 
-    def create_valid_managed_job(self, base, job_config, backend='codex'):
+    def create_valid_managed_job(self, base, job_config, backend='codex', *, request_generation=None):
         workspace = base / 'workspace'
         source_root = base / 'source'
         source_root.mkdir(mode=0o700)
@@ -87,18 +106,24 @@ class OperatorTests(unittest.TestCase):
         self.write_private(executable, '#!/bin/sh\nexit 0\n', 0o700)
         self.write_private(companion, '#!/bin/sh\nexit 0\n', 0o700)
         self.write_private(auth_reference, '')
-        request_path = workspace / 'dotunnel-requests' / f'{backend}.json'
-        request_path.parent.mkdir(mode=0o700)
+        generation = job_config.parent.name if job_config.parent.parent.name == 'native-cli' else None
+        request_generation = generation if request_generation is None else request_generation
+        request_relative = (
+            f'dotunnel-requests/{request_generation}/{backend}.json'
+            if request_generation is not None else f'dotunnel-requests/{backend}.json'
+        )
+        request_path = workspace / request_relative
+        request_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.write_private(request_path, json.dumps({
             'target': 'project',
             'mode': 'review',
             'instruction': 'Review the fixture source.',
         }) + '\n')
-        job_config.parent.mkdir(mode=0o700)
+        job_config.parent.mkdir(mode=0o700, parents=True)
         self.write_private(job_config, json.dumps({
             'backend': backend,
             'workspace': str(workspace),
-            'request': f'dotunnel-requests/{backend}.json',
+            'request': request_relative,
             'runtime': {
                 'executable': str(executable),
                 'companion': str(companion),
@@ -208,7 +233,7 @@ class OperatorTests(unittest.TestCase):
             base = Path(temporary)
             task, backend = self.make_managed_cli_task(base, base / 'setup', 'codex')
             directory, _, _, client = self.make_setup(base, [task])
-            backend.parent.mkdir(mode=0o700)
+            backend.parent.mkdir(mode=0o700, parents=True)
             invalid_config = '{"backend":"codex","runtime":"not-a-real-config"}\n'
             self.write_private(backend, invalid_config)
             before = backend.read_bytes()
@@ -229,8 +254,9 @@ class OperatorTests(unittest.TestCase):
             task, job_config = self.make_managed_cli_task(base, base / 'setup', 'codex')
             directory, _, _, client = self.make_setup(base, [task])
             self.create_valid_managed_job(base, job_config)
+            self.assertNotIn('generation', json.loads(job_config.read_text(encoding='utf-8')))
             health_url = self.start_ready_tunnel(directory)
-            request_path = base / 'workspace' / 'dotunnel-requests' / 'codex.json'
+            request_path = base / 'workspace' / 'dotunnel-requests' / 'fixture-generation' / 'codex.json'
             auth_reference = base / 'native-runtime' / 'auth-reference'
             job_before = job_config.read_bytes()
             request_before = request_path.read_bytes()
@@ -254,6 +280,32 @@ class OperatorTests(unittest.TestCase):
                 (auth_before.st_atime_ns, auth_before.st_ino, auth_before.st_size, auth_before.st_mtime_ns, auth_before.st_mode),
             )
             self.assertTrue(health_url.exists())
+
+    def test_generated_job_rejects_a_request_from_another_generation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            _task, job_config = self.make_managed_cli_task(base, base / 'setup', 'codex')
+            self.make_setup(base)
+            self.create_valid_managed_job(
+                base, job_config, request_generation='another-generation',
+            )
+            with patch('dotunnel.integrations._check_bwrap'):
+                self.assertFalse(
+                    integrations.validate_managed_job(job_config, 'codex', base / 'workspace')
+                )
+
+    def test_legacy_managed_job_layout_remains_loadable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            _task, job_config = self.make_managed_cli_task(
+                base, base / 'setup', 'codex', generation=None,
+            )
+            self.make_setup(base)
+            self.create_valid_managed_job(base, job_config)
+            with patch('dotunnel.integrations._check_bwrap'):
+                self.assertTrue(
+                    integrations.validate_managed_job(job_config, 'codex', base / 'workspace')
+                )
 
     def test_doctor_rejects_reserved_task_name_pointing_to_another_config(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -41,6 +41,8 @@ class SupervisionConfigTests(unittest.TestCase):
                 "path": str(self.root),
                 "connections": ["local"],
                 "profiles": ["codex"],
+                "allowed_actions": ["read", "start", "prompt", "answer"],
+                "profile_actions": {"codex": ["start", "prompt", "answer"]},
                 "workspaces": ["w123"],
                 "protected": False,
             }],
@@ -51,6 +53,7 @@ class SupervisionConfigTests(unittest.TestCase):
                 "args": ["--full-auto"],
                 "backends": ["herdr", "tmux"],
                 "input_mode": "bracketed-paste",
+                "executable_policy": "compatible",
             }],
         }
 
@@ -63,6 +66,10 @@ class SupervisionConfigTests(unittest.TestCase):
         value = self.base_value([self.connection("h", "herdr"), self.connection("t", "tmux")])
         value["projects"][0]["connections"] = ["h", "t"]
         value["projects"][0]["profiles"] = ["codex-herdr", "codex-tmux"]
+        value["projects"][0]["profile_actions"] = {
+            "codex-herdr": ["start", "prompt", "answer"],
+            "codex-tmux": ["start", "prompt", "answer"],
+        }
         value["profiles"] = [
             {**value["profiles"][0], "id": "codex-herdr", "backends": ["herdr"]},
             {**value["profiles"][0], "id": "codex-tmux", "backends": ["tmux"]},
@@ -74,6 +81,9 @@ class SupervisionConfigTests(unittest.TestCase):
             self.assertEqual(eligible, ["codex-" + backend])
         value["profiles"] = value["profiles"][:1]
         value["projects"][0]["profiles"] = ["codex-herdr"]
+        value["projects"][0]["profile_actions"] = {
+            "codex-herdr": ["start", "prompt", "answer"],
+        }
         with self.assertRaises(ValueError):
             self.parse(value)
 
@@ -203,6 +213,44 @@ class SupervisionConfigTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.parse(value)
 
+    def test_project_actions_are_required_ceiling_and_input_requires_read(self):
+        value = self.base_value()
+        value["projects"][0]["profile_actions"]["codex"] = ["read"]
+        with self.assertRaises(ValueError):
+            self.parse(value)
+
+        value = self.base_value()
+        value["projects"][0]["allowed_actions"] = ["read"]
+        with self.assertRaises(ValueError):
+            self.parse(value)
+
+        value = self.base_value()
+        del value["projects"][0]["allowed_actions"]
+        with self.assertRaises(ValueError):
+            self.parse(value)
+
+        value = self.base_value()
+        value["projects"][0]["allowed_actions"] = ["prompt"]
+        value["projects"][0]["profile_actions"] = {"codex": ["prompt"]}
+        with self.assertRaises(ValueError):
+            self.parse(value)
+
+    def test_executable_policy_defaults_compatible_and_strict_rejects_writable_hardlinks(self):
+        profile_executable = self.bin / "profile-agent"
+        profile_executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        profile_executable.chmod(0o777)
+        os.link(profile_executable, self.bin / "profile-agent-link")
+
+        value = self.base_value()
+        value["profiles"][0].pop("executable_policy")
+        value["profiles"][0]["executable"] = str(profile_executable)
+        parsed = self.parse(value)
+        self.assertEqual(parsed.profiles["codex"].executable_policy, "compatible")
+
+        value["profiles"][0]["executable_policy"] = "strict"
+        with self.assertRaises(ValueError):
+            self.parse(value)
+
     def test_readonly_target_schema_rejects_unknown_generation_and_unregistered_project(self):
         valid = self.base_value([self.connection("tmux", "tmux")])
         valid["projects"][0]["connections"] = ["tmux"]
@@ -282,7 +330,9 @@ class SupervisionConfigTests(unittest.TestCase):
     def test_omitting_supervision_does_not_inspect_optional_backend_executables(self):
         from dotunnel.config import load_config
 
-        self.config_path.write_text(json.dumps({"root": str(self.root), "tasks": []}), encoding="utf-8")
+        self.config_path.write_text(json.dumps({
+            "root": str(self.root), "tasks": [], "file_access": {"read": [], "write": []}
+        }), encoding="utf-8")
         self.config_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
         loaded = load_config(self.config_path)
         self.assertIsNone(loaded.supervision)

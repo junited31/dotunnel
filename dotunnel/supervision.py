@@ -17,8 +17,7 @@ import time
 from typing import Any, Protocol
 import uuid
 
-from .supervision_config import SupervisionError, SupervisionSettings, canonical_sha256, protected
-from .supervision_state import SupervisionState
+from .supervision_config import SupervisionError, SupervisionSettings, _trusted_executable, canonical_sha256, protected
 
 _KEYS = frozenset(('enter', 'esc', 'up', 'down', 'left', 'right', 'tab', 'y', 'n', *map(str, range(1, 10))))
 _ANSI = re.compile(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))')
@@ -338,8 +337,13 @@ class Supervisor:
                     row['scope'] = key + ':' + p.id
                     row['protected'] = self._protected(row)
                     row['approved'] = self.state.approved(row['scope'], self.settings.generation)
-                    writable = profile is not None and not row.get('readonly', False) and row['process_state'] == 'running' and not row['protected'] and row['approved']
-                    row['capabilities'] = {'read': True, 'prompt': writable, 'answer': writable, 'ordering': 'best_effort'}
+                    mutation_eligible = profile is not None and not row.get('readonly', False) and row['process_state'] == 'running' and not row['protected'] and row['approved']
+                    row['capabilities'] = {
+                        'read': p.allows('read'),
+                        'prompt': mutation_eligible and p.allows('prompt', profile.id),
+                        'answer': mutation_eligible and p.allows('answer', profile.id),
+                        'ordering': 'best_effort',
+                    }
                     normalized.append(row)
                 return normalized, None
             except (SupervisionError, asyncio.TimeoutError, OSError):
@@ -413,6 +417,9 @@ class Supervisor:
 
     async def _read(self, target: str, lines: int, *, deadline: float) -> JSON:
         row = await self._resolve(target, deadline=deadline)
+        project = self.settings.projects[row['project']]
+        if not project.allows('read'):
+            raise SupervisionError('unsupported_operation', reason='project_read_denied')
         current = await self.backends[row['connection']].read(row, lines, deadline=deadline)
         if current.get('identity') != row['identity']:
             raise SupervisionError('stale_target')
@@ -513,12 +520,16 @@ class Supervisor:
             deadline = time.monotonic() + 20
             row = await self._resolve(target, deadline=deadline)
             self._admit(row)
-            fresh = await self._read(target, old['lines'], deadline=deadline)
-            if self._open('o', fresh['observation'])['digest'] != old.get('digest'):
-                raise SupervisionError('stale_observation')
             profile = self._profile(row)
             if profile is None:
                 raise SupervisionError('unsupported_operation', reason='profile_unavailable')
+            project = self.settings.projects[row['project']]
+            if not project.allows(action, profile.id):
+                raise SupervisionError('unsupported_operation', reason='profile_action_denied')
+            fresh = await self._read(target, old['lines'], deadline=deadline)
+            if self._open('o', fresh['observation'])['digest'] != old.get('digest'):
+                raise SupervisionError('stale_observation')
+            _trusted_executable(profile.executable, self.settings.workspace_root, policy=profile.executable_policy)
             self.state.prepare(operation_id, fingerprint, {'connection': row['connection'], 'project': row['project'], 'profile': profile.id, 'generation': self.settings.generation, 'target': target})
             try:
                 self.state.audit({'event': 'dispatch_prepared', 'action': action, 'operation_id': operation_id, 'connection': row['connection'], 'project': row['project'], 'profile': profile.id, 'generation': self.settings.generation})
@@ -585,6 +596,9 @@ class Supervisor:
             scope = key + ':' + project
             if not self.state.approved(scope, self.settings.generation):
                 raise SupervisionError('not_approved')
+            if not p.allows('start', profile):
+                raise SupervisionError('unsupported_operation', reason='profile_action_denied')
+            _trusted_executable(profile_settings.executable, self.settings.workspace_root, policy=profile_settings.executable_policy)
             binding = {'connection': key, 'project': project, 'profile': profile, 'generation': self.settings.generation}
             self.state.check_target_capacity()
             self.state.prepare(operation_id, fingerprint, binding)

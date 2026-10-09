@@ -26,7 +26,8 @@ class SetupTests(unittest.TestCase):
         profile = setup.create_artifacts(self.destination, TUNNEL, SYNTHETIC_KEY)
         from dotunnel.config import load_config
         config = load_config(self.destination / "config.json")
-        self.assertEqual(config.tasks, [])
+        self.assertEqual(config.file_access.read, ())
+        self.assertEqual(config.file_access.write, ())
         self.assertFalse((self.destination / "runtime-api-key").is_relative_to(config.root))
         self.assertFalse(profile.is_relative_to(config.root))
         self.assertEqual(list(config.root.iterdir()), [])

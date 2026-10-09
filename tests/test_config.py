@@ -15,7 +15,7 @@ class ConfigTests(unittest.TestCase):
         self.config = self.base / "config.json"
 
     def save(self, **changes):
-        data = {"root": str(self.root), "tasks": []}
+        data = {"root": str(self.root), "tasks": [], "file_access": {"read": [], "write": []}}
         data.update(changes)
         self.config.write_text(json.dumps(data))
         self.config.chmod(0o600)
@@ -29,7 +29,30 @@ class ConfigTests(unittest.TestCase):
         self.save()
         result = self.load()
         self.assertEqual(result.root, self.root)
-        self.assertEqual(result.tasks, [])
+        self.assertEqual(result.file_access.read, ())
+        self.assertEqual(result.file_access.write, ())
+
+    def test_missing_file_access_is_rejected(self):
+        self.config.write_text(json.dumps({"root": str(self.root), "tasks": []}))
+        self.config.chmod(0o600)
+        with self.assertRaises(ValueError):
+            self.load()
+
+    def test_parses_explicit_file_access_policy(self):
+        self.save(
+            file_access={
+                "read": [{"path": "src/public.txt", "kind": "file"}],
+                "write": [],
+            }
+        )
+        result = self.load()
+        self.assertTrue(result.file_access.allows("read", ("src", "public.txt")))
+        self.assertFalse(result.file_access.allows("read", ("src", "private.txt")))
+
+    def test_rejects_invalid_file_access_policy(self):
+        self.save(file_access={"read": [], "write": [{"path": "outside.txt", "kind": "file"}]})
+        with self.assertRaises(ValueError):
+            self.load()
 
     def test_rejects_config_inside_writable_root(self):
         path = self.root / "settings.json"

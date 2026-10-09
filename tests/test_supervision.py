@@ -59,12 +59,30 @@ class SupervisionTests(unittest.IsolatedAsyncioTestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.base = Path(self.temporary.name)
+        agent_temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(agent_temporary.cleanup)
+        executable = Path(agent_temporary.name) / 'agent-cli'
+        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        executable.chmod(0o700)
         self.state = SupervisionState.initialize(self.base / 'state')
         self.addCleanup(self.state.close)
         connection = Connection('c', 'tmux', Path(sys.executable), socket=self.base / 'socket')
-        self.project = Project('p', self.base, ('c',), ('omp',))
-        profile = Profile('omp', 'omp', Path(sys.executable))
-        self.settings = SupervisionSettings(self.base / 'state', {'c': connection}, {'p': self.project}, {'omp': profile}, (), 'c', 'fixture')
+        self.project = Project(
+            'p', self.base, ('c',), ('omp',),
+            allowed_actions=frozenset(('read', 'start', 'prompt', 'answer')),
+            profile_actions={'omp': frozenset(('start', 'prompt', 'answer'))},
+        )
+        profile = Profile('omp', 'omp', executable)
+        self.settings = SupervisionSettings(
+            state_dir=self.base / 'state',
+            workspace_root=self.base,
+            connections={'c': connection},
+            projects={'p': self.project},
+            profiles={'omp': profile},
+            protected_paths=(),
+            default_connection='c',
+            generation='fixture',
+        )
         self.backend = ProcessBackend(self.base)
         self.supervisor = Supervisor(self.settings, self.state, {'c': self.backend})
 
@@ -281,7 +299,7 @@ class SupervisionTests(unittest.IsolatedAsyncioTestCase):
 
 
     async def test_project_profile_allowlist_is_rechecked_before_input(self):
-        extra = Profile('other', 'omp', Path(sys.executable))
+        extra = Profile('other', 'omp', Path(sys.executable).resolve())
         settings = replace(self.settings, profiles={**self.settings.profiles, 'other': extra})
         self.supervisor = Supervisor(settings, self.state, {'c': self.backend})
         await self.supervisor.approve('c:p')

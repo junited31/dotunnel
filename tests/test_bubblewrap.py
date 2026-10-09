@@ -201,18 +201,20 @@ class SetupGatingTests(unittest.TestCase):
             return install_ok
 
         output = io.StringIO()
+        available = {"codex": Path("/unused/codex")} if installed is None else installed
         with contextlib.redirect_stdout(output):
-            result = self.onboarding.configure_directory(
+            selected = self.onboarding._choose_fixed_jobs(
+                available,
+                set(),
                 self.directory,
-                {"codex": Path("/unused/codex")} if installed is None else installed,
-                selector_fn=selector,
+                chooser=selector,
                 prompt_fn=lambda _text: next(answers),
-                bubblewrap_fn=lambda: next(statuses),
+                check=lambda: next(statuses),
                 sudo_fn=lambda: sudo,
                 install_fn=install,
                 install_argv_fn=lambda: ARGV,
             )
-        return result, selections, installs, output.getvalue()
+        return selected is not None, selections, installs, output.getvalue()
 
     def test_sudo_account_installs_on_default_yes_and_continues_to_selection(self):
         _result, selections, installs, _output = self.configure(["missing", "ready"], [""], sudo=True)

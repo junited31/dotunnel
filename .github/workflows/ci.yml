@@ -69,7 +69,7 @@ jobs:
           "$RUNNER_TEMP/wheel-smoke/bin/python" -m pip install --disable-pip-version-check dist/*.whl
           smoke=$(mktemp -d "$RUNNER_TEMP/dotunnel-smoke.XXXXXX")
           mkdir -m 700 "$smoke/workspace"
-          printf '{"root":"%s/workspace","tasks":[]}\n' "$smoke" > "$smoke/config.json"
+          printf '{"root":"%s/workspace","file_access":{"read":[],"write":[]},"tasks":[]}\n' "$smoke" > "$smoke/config.json"
           chmod 600 "$smoke/config.json"
           cd "$smoke"
           "$RUNNER_TEMP/wheel-smoke/bin/dotunnel" help

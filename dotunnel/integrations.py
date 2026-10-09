@@ -11,6 +11,7 @@ import subprocess
 from typing import Any
 
 from . import cli_backend, cli_jobs, config as config_helpers
+from .file_access import FileAccess
 from .files import WorkspaceFiles, _validate_components
 
 
@@ -102,6 +103,28 @@ def discover_clis() -> dict[str, Path]:
             found[backend] = resolved
     return found
 
+
+
+def _job_layout(config_path: Path, backend: str, request: str) -> tuple[Path, Path] | None:
+    """Return the private setup root and request path for a managed job layout."""
+    if config_path.name != f"{backend}.json":
+        return None
+    parts = Path(request).parts
+    if len(parts) == 2 and parts[0] == "dotunnel-requests" and parts[1] == f"{backend}.json":
+        if config_path.parent.name == "cli-jobs":
+            return config_path.parent.parent, Path(*parts)
+        return None
+    if (
+        len(parts) == 3
+        and parts[0] == "dotunnel-requests"
+        and parts[2] == f"{backend}.json"
+        and parts[1]
+        and all(character.isalnum() or character in "_-" for character in parts[1])
+        and config_path.parent.name == parts[1]
+        and config_path.parent.parent.name == "native-cli"
+    ):
+        return config_path.parent.parent.parent, Path(*parts)
+    return None
 
 def _checked_path(
     path: Path, kind: str, *, private: bool = False, root_only: bool = False,
@@ -209,7 +232,15 @@ def _check_target_files(target: cli_jobs._Target, workspace: Path) -> None:
     root = target.root
     if root == workspace or root.is_relative_to(workspace) or workspace.is_relative_to(root):
         raise ValueError("Source root and writable MCP workspace must be separate")
-    source = WorkspaceFiles(root)
+    source = WorkspaceFiles(
+        root,
+        FileAccess.parse(
+            {
+                "read": [{"path": path, "kind": "file"} for path in target.files],
+                "write": [],
+            }
+        ),
+    )
     try:
         for relative in target.files:
             components = _validate_components(relative, allow_root=False)
@@ -431,21 +462,22 @@ def _validate_job_data(
     request_text: str,
     *,
     bwrap_path: Path = BWRAP_PATH,
+    workspace_ready: bool = True,
 ) -> cli_jobs._JobConfig:
     try:
         parsed = cli_jobs._parse_config_shape(value)
+        layout = _job_layout(config_path, backend, parsed.request)
         if (
             parsed.backend != backend
             or parsed.workspace != workspace
-            or parsed.request != f"dotunnel-requests/{backend}.json"
-            or config_path.name != f"{backend}.json"
-            or config_path.parent.name != "cli-jobs"
+            or layout is None
             or len(parsed.targets) != 1
         ):
             raise ValueError
         cli_jobs._validate_runtime_paths(parsed, config_path)
         cli_jobs._validate_target_roots(parsed.targets)
-        _check_workspace(workspace)
+        if workspace_ready:
+            _check_workspace(workspace)
         credentials = {
             Path(path) for key, path in parsed.runtime.items()
             if key in {"auth", "oauth_token", "config"}
@@ -454,7 +486,7 @@ def _validate_job_data(
             Path(str(path) + suffix) for path in tuple(credentials)
             for suffix in ("-wal", "-shm")
         }
-        private_state = config_path.parent.parent
+        private_state, _request_path = layout
         for target in parsed.targets.values():
             for relative in target.files:
                 candidate = target.root / relative
@@ -471,7 +503,10 @@ def _validate_job_data(
 
 
 def _read_request(workspace: Path, request: str) -> str:
-    files = WorkspaceFiles(workspace)
+    files = WorkspaceFiles(
+        workspace,
+        FileAccess.parse({"read": [{"path": request, "kind": "file"}], "write": []}),
+    )
     try:
         return files.read_file(request)["content"]
     finally:
@@ -488,12 +523,11 @@ def _load_managed_job(
     try:
         actual_path, value = cli_jobs._load_private_config(os.fspath(config_path))
         parsed = cli_jobs._parse_config_shape(value)
+        layout = _job_layout(actual_path, backend, parsed.request)
         if (
             parsed.backend != backend
             or parsed.workspace != workspace
-            or parsed.request != f"dotunnel-requests/{backend}.json"
-            or actual_path.name != f"{backend}.json"
-            or actual_path.parent.name != "cli-jobs"
+            or layout is None
         ):
             raise cli_jobs._InvalidConfig
         _check_private_file(actual_path, limit=64 * 1024)

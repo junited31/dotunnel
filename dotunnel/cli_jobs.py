@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from . import config as config_helpers
+from .file_access import FileAccess
 from .files import WorkspaceFiles, _validate_components
 
 
@@ -288,7 +289,13 @@ def _parse_config_shape(value: dict[str, Any]) -> _JobConfig:
 def _validate_target_roots(targets: dict[str, _Target]) -> None:
     for target in targets.values():
         try:
-            source_root = WorkspaceFiles(target.root)
+            access = FileAccess.parse(
+                {
+                    "read": [{"path": path, "kind": "file"} for path in target.files],
+                    "write": [],
+                }
+            )
+            source_root = WorkspaceFiles(target.root, access)
             source_root.close()
         except (OSError, TypeError, ValueError):
             raise _InvalidConfig from None
@@ -426,11 +433,23 @@ def _snapshot_sources(
     snapshot: Path,
 ) -> tuple[WorkspaceFiles, dict[str, _PinnedSource]]:
     try:
-        source_files = WorkspaceFiles(target.root)
+        source_access = FileAccess.parse(
+            {
+                "read": [{"path": path, "kind": "file"} for path in target.files],
+                "write": [],
+            }
+        )
+        snapshot_access = FileAccess.parse(
+            {
+                "read": [{"path": path, "kind": "file"} for path in target.files],
+                "write": [{"path": path, "kind": "file"} for path in target.files],
+            }
+        )
+        source_files = WorkspaceFiles(target.root, source_access)
     except (OSError, ValueError, TypeError):
         raise _InvalidConfig from None
     try:
-        candidate_files = WorkspaceFiles(snapshot)
+        candidate_files = WorkspaceFiles(snapshot, snapshot_access)
     except (OSError, ValueError, TypeError):
         source_files.close()
         raise _InvalidConfig from None
@@ -493,7 +512,10 @@ def _scan_candidate(snapshot: Path, expected_paths: set[str]) -> dict[str, bytes
             expected_directories.add("/".join(components[:index]))
 
     try:
-        candidate_root = WorkspaceFiles(snapshot)
+        readonly_access = FileAccess.parse(
+            {"read": [{"path": ".", "kind": "tree"}], "write": []}
+        )
+        candidate_root = WorkspaceFiles(snapshot, readonly_access)
     except (OSError, TypeError, ValueError):
         raise _CandidateInvalid from None
     found: dict[str, bytes] = {}
@@ -1074,7 +1096,10 @@ def main(argv: list[str]) -> int:
         if config_path.is_relative_to(code_root) or code_root.is_relative_to(job_config.workspace):
             raise _InvalidConfig
         try:
-            workspace_files = WorkspaceFiles(job_config.workspace)
+            request_access = FileAccess.parse(
+                {"read": [{"path": job_config.request, "kind": "file"}], "write": []}
+            )
+            workspace_files = WorkspaceFiles(job_config.workspace, request_access)
         except (OSError, TypeError, ValueError):
             raise _InvalidConfig from None
         try:

@@ -31,7 +31,7 @@ def build_server(config: Config) -> tuple[MCPServer, WorkspaceFiles]:
     try:
         runner = CliRunner(tuple(profile.executable.parent for profile in config.supervision.profiles.values())) if config.supervision is not None else None
         supervisor = Supervisor(config.supervision, state, build_backends(config.supervision, runner)) if config.supervision is not None and state is not None and runner is not None else None
-        files = WorkspaceFiles(config.root)
+        files = WorkspaceFiles(config.root, config.file_access)
     except BaseException:
         if state is not None:
             state.close()

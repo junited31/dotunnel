@@ -1,11 +1,17 @@
 # Changelog
 
-## Unreleased
+## 0.1.6 (2026-10-09)
 
-- Advance the default installer and bilingual manual-install examples to the published `0.1.5` wheel, pinned to 123908 bytes and SHA-256 `5b617552d1d9dbaabd4209a99f42c4a25e7757fad8c3e9a0e684d9f01a949810`. Existing installations, services, credentials and `0.1.4` release assets remain unchanged.
+- Integrate workspace file-access and optional CLI/live-agent permission selection into interactive setup. New MCP read and write rules start empty; exact-file and directory-tree rules are explicit, writes must remain within read access, and file listing/search respects the read rules.
+- Distinguish fixed Bubblewrap CLI candidate jobs from live Herdr/tmux agents, which retain the native agent's OS and authentication authority. Live profile `compatible` executable policy is the default and may allow writable or shared-inode executable code; `strict` remains selectable.
+- Give live projects an action ceiling and profiles separate mutation grants, both empty for new setup; these setup-time permissions do not approve runtime scopes or start agents. Require a default-No final review before key input/artifact generation, atomically publish configuration last, and keep new supervision-state initialization and Tunnel connection startup separate. Report publication state and any remaining private preparation paths on errors; report uncertain foreground startup as potentially attempted.
+- Make legacy migration explicit and fail closed when an existing local client is active or its state is unknown. Translate old supervision rights and preserve legacy whole-workspace read/write access unless the operator narrows it during review; require separate confirmation that no other client is using the Tunnel. Runtime configuration now requires `file_access`: migrate older configurations before restarting with 0.1.6; package installation alone does not migrate them.
+- Allow explicitly reviewed unregistration of unavailable setup-owned CLI jobs without deleting prior artifacts; keep registrations by default when optional integration configuration is skipped. Validate retained jobs against the reviewed workspace and recheck persisted supervision authority read-only before publication. Preserve referenced artifacts when initial publication is unconfirmed, and show safe manual-start/registration guidance on saved-but-not-started paths.
+- Include every prospective registered task's effective command in the final permission review, retain the foreground launcher's clean environment in manual startup commands, and align CLI help with integrated permission migration.
 
 ## 0.1.5 (2026-10-08)
 
+- Advance the default installer and bilingual manual-install examples to the published `0.1.5` wheel, pinned to 123908 bytes and SHA-256 `5b617552d1d9dbaabd4209a99f42c4a25e7757fad8c3e9a0e684d9f01a949810`. Existing installations, services, credentials and `0.1.4` release assets remain unchanged.
 - Align package metadata and the public module version at `0.1.5`. Existing `0.1.4` release assets remain unchanged.
 - Add optional core Herdr/tmux supervision through an explicit fixed project/profile/connection registry. The base seven file/task tools stay unchanged; one shared set of eight `agent_*` tools is added only when enabled (15 total), with no broadcast or automatic fallback.
 - Require explicit `dotunnel supervision init/reinit` for owner-only state outside the writable root. Scope approval binds `connection_id:project_id` and the active configuration generation; opaque handles and fresh signed observations bind writes to current identity. Herdr may provide weak process identity, while tmux writes are limited to managed agents with recorded and rechecked native identity; exact existing pane registrations remain read-only.

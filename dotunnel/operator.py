@@ -21,7 +21,7 @@ _HELP = """Usage: dotunnel <command> [options]
 
 Commands:
   help       Show this usage and command reference.
-  setup      Create a private Tunnel setup or reconfigure its CLI integrations.
+  setup      Review workspace, file access, fixed CLI tasks and live-agent permissions.
   update     Check GitHub Releases and ask Y/n before upgrading this virtualenv.
   doctor     Validate an existing setup and inspect local Tunnel/CLI readiness.
   supervision  Initialize or explicitly reinitialize private supervision state.
@@ -35,7 +35,7 @@ Engine commands (normally started by the Tunnel client or a registered task):
              Save a Claude long-lived token to a private file from an interactive terminal.
 
 Setup options:
-  --directory DIR       New private setup directory or existing setup for integration changes.
+  --directory DIR       New private setup or explicit permission migration of an existing setup.
   --tunnel-client PATH  Path to the separately installed client executable.
 
 Doctor options:
@@ -178,6 +178,37 @@ def _matches_managed_task(task: object, backend: str, job_config: Path, workspac
         Path(value["argv"][0]), executable=True,
     )
 
+
+def _managed_job_config_path(task: object, backend: str, directory: Path) -> Path | None:
+    argv = getattr(task, "argv", ())
+    if (
+        not isinstance(argv, (list, tuple))
+        or len(argv) != 4
+        or tuple(argv[1:3]) != ("cli-job", "--config")
+        or not isinstance(argv[3], str)
+    ):
+        return None
+    job_config = Path(argv[3])
+    if not job_config.is_absolute() or ".." in job_config.parts:
+        return None
+    try:
+        relative = job_config.relative_to(directory)
+    except ValueError:
+        return None
+    if relative == Path("cli-jobs") / f"{backend}.json":
+        return job_config
+    if (
+        len(relative.parts) == 3
+        and relative.parts[0] == "native-cli"
+        and relative.parts[1]
+        and all(character.isalnum() or character in "_-" for character in relative.parts[1])
+        and relative.parts[2] == f"{backend}.json"
+    ):
+        return job_config
+    return None
+
+
+
 def _diagnose(argv: list[str]) -> int:
     parser = _DoctorParser(
         prog="dotunnel doctor",
@@ -234,9 +265,9 @@ def _diagnose(argv: list[str]) -> int:
         checks_ok = False
 
     for backend in sorted(configured_names):
-        job_config = directory / "cli-jobs" / f"{backend}.json"
         task = tasks_by_name[f"dotunnel-{backend}"]
-        if not _matches_managed_task(task, backend, job_config, config.root):
+        job_config = _managed_job_config_path(task, backend, directory)
+        if job_config is None or not _matches_managed_task(task, backend, job_config, config.root):
             valid_job = False
         else:
             try:

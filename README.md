@@ -53,16 +53,19 @@ Tunnel ID and Restricted runtime key. `dotunnel` cannot create these for you.
 "$HOME/.local/share/dotunnel/venv/bin/dotunnel" setup --directory "$HOME/.dotunnel-setup"
 ```
 
-Setup creates a private profile/config/key outside a separate workspace, which
-starts with `tasks: []`. Read the [detailed guide](docs/guide.md) for account
-isolation, private installation and connecting the Tunnel to ChatGPT.
+Setup creates a private profile/config/key outside the workspace. In 0.1.6,
+interactive setup also asks which workspace paths MCP file tools may read or
+write. Both rule lists start empty, and write access must stay within read
+access. You review and explicitly approve the permission summary before key
+entry or generated files. Tunnel connection start and live-agent scope approval
+are separate choices; see the [detailed guide](docs/guide.md#3-set-up-a-private-secure-mcp-tunnel).
 
 ## Commands
 
 | Command | Purpose |
 |---|---|
 | `dotunnel help` | Show usage |
-| `dotunnel setup` | Create a Tunnel setup or configure optional CLI integrations |
+| `dotunnel setup` | Review workspace file access and optional CLI/supervision permissions |
 | `dotunnel doctor` | Read-only configuration, client and connection diagnosis |
 | `dotunnel update` | Check and interactively install a newer stable release |
 | `dotunnel serve --config PATH` | Run the stdio MCP server with a trusted configuration |
@@ -72,12 +75,15 @@ isolation, private installation and connecting the Tunnel to ChatGPT.
 
 Supervision is disabled unless the trusted configuration contains a fixed
 `supervision` registry and its private state has been explicitly initialized.
-The same eight shared `agent_*` tools are added whether one or both backends
-are configured, for 15 MCP tools total. Fixed projects and profiles restrict
-which registered connections can be used. Herdr sessions and tmux sockets may
-coexist; the default connection chooses a new start only and never enables
-broadcast or automatic fallback. See the [detailed guide](docs/guide.md#7-optional-herdrtmux-agent-supervision)
-for approvals, handles, receipts and identity limits.
+It adds eight shared `agent_*` tools (15 MCP tools total). From 0.1.6,
+interactive setup can select project action ceilings and per-profile
+`start`/`prompt`/`answer` rights; new grants start empty. Setup grants do not
+approve runtime scopes or start agents. Live profiles default to the
+`compatible` executable policy, which may allow writable or shared-inode
+executable code; `strict` is available. Live agents retain their native OS
+authority and are not run in the fixed-job Bubblewrap candidate. See the
+[detailed guide](docs/guide.md#7-optional-herdrtmux-agent-supervision) for
+scope and identity limits.
 
 Available in [0.1.5](https://github.com/junited31/dotunnel/releases/tag/v0.1.5).
 Installing the package does not configure or activate supervision.
@@ -100,15 +106,20 @@ support remains unavailable.
 - Run as a non-root account, preferably a dedicated account without broad groups
   or sudo. The project does not create accounts or change permissions.
 - Keep the installed program, trusted configuration/credentials and writable
-  workspace separate. Setup starts with `tasks: []` and stores credentials
-  outside the workspace.
+  workspace separate. Setup starts with `tasks: []` and empty MCP read/write
+  rules; credentials are stored outside the workspace.
 - Fixed tasks run with the MCP process account's full OS permissions. A fixed
   command or workspace is not a sandbox; review task code and side effects.
 - stdio MCP has no separate user authentication. Restrict who can reach it;
   allowed files and task output may contain sensitive data.
-- Optional CLI jobs require Bubblewrap. Their native CLI runs as the same user
-  and may read its referenced credentials; allowlisted content can be sent to
-  the provider. A candidate is not automatically applied or verified.
+- Optional fixed CLI jobs require Bubblewrap and use allowlisted candidate
+  copies; edits are not applied to source files automatically. The native CLI
+  still runs as the same user, can read referenced credentials and shares
+  provider networking.
+- Live Herdr/tmux agents do not use that Bubblewrap candidate boundary. They
+  retain the native agent's OS filesystem and authentication authority; MCP
+  file rules do not confine them. Compatible live executable policy accepts a
+  writable/shared-inode code risk, not a security guarantee.
 - `curl | sh` executes the repository's installer code as your user.
   Trust/review that script; the wheel checksum does not make the shell script
   itself a trust-free download.

@@ -24,6 +24,7 @@ class SupervisionProtocolTests(unittest.IsolatedAsyncioTestCase):
             state.close()
             config = base / 'config.json'
             config.write_text(json.dumps({
+                'file_access': {'read': [], 'write': []},
                 'root': str(root), 'tasks': [],
                 'supervision': {
                     'state_dir': str(base / 'state'),
@@ -31,7 +32,14 @@ class SupervisionProtocolTests(unittest.IsolatedAsyncioTestCase):
                         {'id': 'a', 'backend': 'tmux', 'executable': str(executable), 'socket': str(base / 'a.sock')},
                         {'id': 'b', 'backend': 'tmux', 'executable': str(executable), 'socket': str(base / 'b.sock')},
                     ],
-                    'projects': [{'id': 'p', 'path': str(root), 'connections': ['a', 'b'], 'profiles': ['omp']}],
+                    'projects': [{
+                        'id': 'p',
+                        'path': str(root),
+                        'connections': ['a', 'b'],
+                        'profiles': ['omp'],
+                        'allowed_actions': [],
+                        'profile_actions': {},
+                    }],
                     'profiles': [{'id': 'omp', 'kind': 'omp', 'executable': '/usr/bin/true'}],
                 },
             }))
@@ -96,11 +104,19 @@ class SupervisionProtocolTests(unittest.IsolatedAsyncioTestCase):
             state.close()
             config = base / 'config.json'
             config.write_text(json.dumps({
+                'file_access': {'read': [], 'write': []},
                 'root': str(root), 'tasks': [],
                 'supervision': {
                     'state_dir': str(base / 'state'),
                     'connections': [{'id': 'h', 'backend': 'herdr', 'executable': str(executable), 'session': 'fixture'}],
-                    'projects': [{'id': 'p', 'path': str(root), 'connections': ['h'], 'profiles': ['omp']}],
+                    'projects': [{
+                        'id': 'p',
+                        'path': str(root),
+                        'connections': ['h'],
+                        'profiles': ['omp'],
+                        'allowed_actions': ['read', 'prompt', 'answer'],
+                        'profile_actions': {'omp': ['prompt', 'answer']},
+                    }],
                     'profiles': [{'id': 'omp', 'kind': 'omp', 'executable': str(bun), 'backends': ['herdr']}],
                 },
             }))
@@ -219,6 +235,7 @@ class SupervisionProtocolTests(unittest.IsolatedAsyncioTestCase):
             config = base / "config.json"
             config.write_text(json.dumps({
                 "root": str(root),
+                "file_access": {"read": [], "write": []},
                 "tasks": [],
                 "supervision": {
                     "state_dir": str(base / "state"),
@@ -241,6 +258,8 @@ class SupervisionProtocolTests(unittest.IsolatedAsyncioTestCase):
                         "path": str(root),
                         "connections": ["herdr", "tmux"],
                         "profiles": ["omp"],
+                        "allowed_actions": ["read", "start", "prompt", "answer"],
+                        "profile_actions": {"omp": ["start", "prompt", "answer"]},
                     }],
                     "profiles": [{
                         "id": "omp",

@@ -1,14 +1,12 @@
-"""Operator-only interactive setup; never exposed as an MCP tool."""
+"""Private setup artifact and Tunnel-client helpers for operator onboarding."""
 
 from __future__ import annotations
 
-import argparse
 import getpass
 import json
 import os
 import re
 import shlex
-import shutil
 import signal
 import stat
 import subprocess
@@ -18,15 +16,54 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import warnings
+import uuid
 from pathlib import Path
-from typing import Callable
 
 from .config import _open_absolute, load_config
 
-TUNNELS_URL = "https://platform.openai.com/settings/organization/tunnels"
-KEYS_URL = "https://platform.openai.com/settings/organization/api-keys"
 PLUGINS_URL = "https://chatgpt.com/plugins"
-CLIENT_URL = "https://github.com/openai/tunnel-client/releases/latest"
+
+
+class ConfigPublicationUnconfirmed(ValueError):
+    """A config rename occurred or its outcome cannot be established safely."""
+
+
+def _initial_rename_outcome(
+    directory_fd: int,
+    temporary: str,
+    identity: tuple[int, int] | None,
+) -> bool | None:
+    """Return whether the staged config definitely was or was not renamed."""
+    if identity is None:
+        return None
+    try:
+        temporary_info = os.stat(temporary, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        temporary_info = None
+    except OSError:
+        return None
+    try:
+        config_info = os.stat("config.json", dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        config_info = None
+    except OSError:
+        return None
+
+    def is_staged_file(info: os.stat_result | None) -> bool:
+        return (
+            info is not None
+            and stat.S_ISREG(info.st_mode)
+            and info.st_uid == os.getuid()
+            and stat.S_IMODE(info.st_mode) == 0o600
+            and info.st_nlink == 1
+            and (info.st_dev, info.st_ino) == identity
+        )
+
+    if is_staged_file(temporary_info) and config_info is None:
+        return False
+    if temporary_info is None and is_staged_file(config_info):
+        return True
+    return None
 
 
 def _trusted_parent(path: Path, *, root_only: bool = False) -> int:
@@ -93,46 +130,215 @@ def _write_private(directory_fd: int, name: str, text: str) -> None:
         stream.write(text)
 
 
-def create_artifacts(directory: Path, tunnel_id: str, key: str) -> Path:
-    """Create a NEW private state directory. Never overwrite or reuse credentials."""
+def _create_workspace(path: Path) -> tuple[int, int, int, int]:
+    parent_fd = _trusted_parent(path.parent)
+    fd = -1
+    created = False
+    try:
+        os.mkdir(path.name, 0o700, dir_fd=parent_fd)
+        created = True
+        fd = os.open(path.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        info = os.fstat(fd)
+        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            raise ValueError("New workspace must be private and operator-owned")
+        return parent_fd, fd, info.st_dev, info.st_ino
+    except BaseException:
+        if fd >= 0:
+            os.close(fd)
+        if created:
+            try:
+                os.rmdir(path.name, dir_fd=parent_fd)
+            except OSError:
+                pass
+        os.close(parent_fd)
+        raise
+
+
+def prepare_private_artifacts(
+    directory: Path,
+    tunnel_id: str,
+    key: str,
+    *,
+    workspace: Path,
+    create_workspace: bool,
+) -> tuple[Path, tuple[int, int, int, int] | None]:
+    """Create key/profile references only after approval; publish no config."""
     _validate(tunnel_id, key)
     directory = _destination(directory)
+    if not workspace.is_absolute() or ".." in workspace.parts or workspace in (Path("/"), Path.home()):
+        raise ValueError("Choose an explicit safe workspace directory")
+    if (directory / "config.json").is_relative_to(workspace):
+        raise ValueError("Private setup configuration must remain outside the writable workspace")
     parent_fd = _trusted_parent(directory.parent)
     try:
         os.mkdir(directory.name, 0o700, dir_fd=parent_fd)
-        os.chmod(directory.name, 0o700, dir_fd=parent_fd, follow_symlinks=False)
         state_fd = os.open(directory.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
     finally:
         os.close(parent_fd)
+    owned_workspace = None
     try:
-        os.mkdir("workspace", 0o700, dir_fd=state_fd)
-        os.chmod("workspace", 0o700, dir_fd=state_fd, follow_symlinks=False)
-        config = directory / "config.json"
-        profile = directory / "profile.yaml"
+        if create_workspace:
+            owned_workspace = _create_workspace(workspace)
+        else:
+            fd = _open_absolute(workspace, os.O_RDONLY | os.O_DIRECTORY)
+            os.close(fd)
         _write_private(state_fd, "runtime-api-key", key + "\n")
-        _write_private(state_fd, "config.json", json.dumps({"root": str(directory / "workspace"), "tasks": []}, indent=2) + "\n")
-        # JSON is also valid YAML; quoting paths/commands must not permit YAML injection.
+        config = directory / "config.json"
         data = {
             "config_version": 1,
-            "control_plane": {
-                "base_url": "https://api.openai.com",
-                "tunnel_id": tunnel_id,
-                "api_key": "file:" + str(directory / "runtime-api-key"),
-            },
+            "control_plane": {"base_url": "https://api.openai.com", "tunnel_id": tunnel_id,
+                              "api_key": "file:" + str(directory / "runtime-api-key")},
             "health": {"listen_addr": "127.0.0.1:0", "url_file": str(directory / "health-url")},
             "admin_ui": {"open_browser": False},
             "log": {"level": "warn", "format": "json"},
-            "mcp": {
-                "stdio_send_initialized_notification": True,
-                "commands": [{"channel": "main", "command": shlex.join([sys.executable, "-I", "-m", "dotunnel", "serve", "--config", str(config)])}],
-            },
+            "mcp": {"stdio_send_initialized_notification": True,
+                    "commands": [{"channel": "main", "command": shlex.join([
+                        sys.executable, "-I", "-m", "dotunnel", "serve", "--config", str(config),
+                    ])}]},
         }
         _write_private(state_fd, "profile.yaml", json.dumps(data, indent=2) + "\n")
+        return directory / "profile.yaml", owned_workspace
+    except BaseException:
+        if owned_workspace is not None:
+            workspace_parent, workspace_fd, device, inode = owned_workspace
+            try:
+                visible = os.stat(workspace.name, dir_fd=workspace_parent, follow_symlinks=False)
+                if (visible.st_dev, visible.st_ino) == (device, inode) and not os.listdir(workspace_fd):
+                    os.rmdir(workspace.name, dir_fd=workspace_parent)
+            except OSError:
+                pass
+            os.close(workspace_fd)
+            os.close(workspace_parent)
+        try:
+            if not os.listdir(state_fd):
+                cleanup_parent = _trusted_parent(directory.parent)
+                try:
+                    os.rmdir(directory.name, dir_fd=cleanup_parent)
+                finally:
+                    os.close(cleanup_parent)
+        except (OSError, ValueError):
+            pass
+        raise
     finally:
         os.close(state_fd)
-    load_config(config)
-    return profile
 
+
+def publish_initial_config(
+    directory: Path,
+    document: dict[str, object],
+    *,
+    expected_directory: tuple[int, int] | None = None,
+) -> Path:
+    """Atomically publish a validated private config after all references exist."""
+    directory = Path(directory)
+    parent_fd = _trusted_parent(directory.parent)
+    try:
+        directory_fd = os.open(directory.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    except BaseException:
+        os.close(parent_fd)
+        raise
+    temporary = f".config.json.{uuid.uuid4().hex}.tmp"
+    created = False
+    temporary_identity: tuple[int, int] | None = None
+    try:
+        opened = os.fstat(directory_fd)
+        visible = os.stat(directory.name, dir_fd=parent_fd, follow_symlinks=False)
+        identity = (opened.st_dev, opened.st_ino)
+        if (opened.st_uid != os.getuid() or stat.S_IMODE(opened.st_mode) != 0o700
+                or identity != (visible.st_dev, visible.st_ino)
+                or (expected_directory is not None and identity != expected_directory)):
+            raise ValueError("Private setup directory changed before configuration publication")
+        try:
+            os.stat("config.json", dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise ValueError("Setup config appeared before initial publication")
+        raw = (json.dumps(document, indent=2) + "\n").encode("utf-8")
+        if len(raw) > 65536:
+            raise ValueError("Configuration exceeds 64 KiB")
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory_fd)
+        created = True
+        try:
+            os.fchmod(fd, 0o600)
+            info = os.fstat(fd)
+            temporary_identity = (info.st_dev, info.st_ino)
+            offset = 0
+            while offset < len(raw):
+                written = os.write(fd, raw[offset:])
+                if written <= 0:
+                    raise OSError
+                offset += written
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        load_config(directory / temporary)
+        current = os.fstat(directory_fd)
+        visible = os.stat(directory.name, dir_fd=parent_fd, follow_symlinks=False)
+        if ((current.st_dev, current.st_ino) != (visible.st_dev, visible.st_ino)
+                or (expected_directory is not None and (visible.st_dev, visible.st_ino) != expected_directory)):
+            raise ValueError("Private setup directory changed before configuration publication")
+        try:
+            os.stat("config.json", dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise ValueError("Setup config appeared before initial publication")
+        try:
+            os.rename(temporary, "config.json", src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+            created = False
+            os.fsync(directory_fd)
+        except BaseException as error:
+            try:
+                rename_outcome = (
+                    True
+                    if not created
+                    else _initial_rename_outcome(directory_fd, temporary, temporary_identity)
+                )
+            except BaseException:
+                rename_outcome = None
+            if rename_outcome is False:
+                raise
+            raise ConfigPublicationUnconfirmed(
+                "The initial config rename occurred or its outcome is uncertain; directory durability is unconfirmed"
+            ) from error
+    except OSError:
+        raise ValueError("The private setup configuration could not be published safely") from None
+    finally:
+        if created and temporary_identity is not None:
+            try:
+                info = os.stat(temporary, dir_fd=directory_fd, follow_symlinks=False)
+                if (
+                    stat.S_ISREG(info.st_mode)
+                    and info.st_uid == os.getuid()
+                    and stat.S_IMODE(info.st_mode) == 0o600
+                    and info.st_nlink == 1
+                    and (info.st_dev, info.st_ino) == temporary_identity
+                ):
+                    os.unlink(temporary, dir_fd=directory_fd)
+            except OSError:
+                pass
+        os.close(directory_fd)
+        os.close(parent_fd)
+    return directory / "config.json"
+
+
+def create_artifacts(directory: Path, tunnel_id: str, key: str) -> Path:
+    """Create a new setup with an explicit empty file-access policy."""
+    directory = Path(directory)
+    workspace = directory / "workspace"
+    profile, owned_workspace = prepare_private_artifacts(
+        directory, tunnel_id, key, workspace=workspace, create_workspace=True,
+    )
+    document = {"root": str(workspace), "file_access": {"read": [], "write": []}, "tasks": []}
+    try:
+        info = os.stat(directory, follow_symlinks=False)
+        publish_initial_config(directory, document, expected_directory=(info.st_dev, info.st_ino))
+    finally:
+        if owned_workspace is not None:
+            os.close(owned_workspace[1])
+            os.close(owned_workspace[0])
+    return profile
 
 def _environment() -> dict[str, str]:
     return {"HOME": str(Path.home()), "PATH": os.defpath, "LANG": "C.UTF-8"}
@@ -226,14 +432,15 @@ def _stop(process: subprocess.Popen) -> None:
         signal.signal(signal.SIGINT, previous)
 
 
-def _registration(tunnel_id: str) -> None:
+def _registration(tunnel_id: str | None) -> None:
     print(f"ChatGPT registration: {PLUGINS_URL}")
-    print(f"Create a custom MCP app; Connection = Tunnel; select/paste {tunnel_id}.")
+    if tunnel_id:
+        print(f"Create a custom MCP app; Connection = Tunnel; select/paste {tunnel_id}.")
     print("This local stdio MCP has no separate OAuth; its Platform runtime key is NOT an app authentication field.")
     print("In ChatGPT, select your registered app (menu location varies by account/UI), then send a file-list request to verify tools.")
 
 
-def _foreground(client: Path, profile: Path, tunnel_id: str) -> int:
+def _foreground(client: Path, profile: Path, tunnel_id: str | None) -> int:
     process = subprocess.Popen(
         [str(client), "run", "--profile-file", str(profile)],
         env=_environment(), start_new_session=True,
@@ -255,73 +462,3 @@ def _foreground(client: Path, profile: Path, tunnel_id: str) -> int:
         print("Foreground client stopped. Private app/Tunnel/key remain; no automatic restart is configured.")
 
 
-class _SetupParser(argparse.ArgumentParser):
-    def error(self, message: str) -> None:
-        # Unknown/malformed argument diagnostics may include a mistakenly pasted key.
-        self.print_usage(sys.stderr)
-        self.exit(2, "Invalid setup arguments; use --help. Runtime keys belong only in the hidden terminal prompt, never argv.\n")
-
-
-def main(
-    argv: list[str] | None = None,
-    *,
-    configuration_callback: Callable[[Path], None] | None = None,
-) -> int:
-    parser = _SetupParser(prog="dotunnel setup", description="Interactive private MCP Tunnel setup (no automatic OS/account/service changes)")
-    parser.add_argument("--directory", type=Path, default=Path.cwd() / ".dotunnel-setup", help="NEW private setup directory; existing directories are refused")
-    parser.add_argument("--tunnel-client", type=Path, default=Path(shutil.which("tunnel-client") or Path.cwd() / ".tunnel-client" / "tunnel-client"), help="Trusted official client executable, installed separately")
-    args = parser.parse_args(argv)
-    print(f"1. Create/manage a Tunnel: {TUNNELS_URL}")
-    print("Organization permissions: Read + Manage for creation; Read + Use for runtime/app selection.")
-    print("Associate BOTH the owning Platform organization and target ChatGPT workspace. Developer-mode access is separate.")
-    print(f"2. Create a Restricted runtime API key (Tunnels Read + Use): {KEYS_URL}")
-    print("Do not use an Admin key. Key permissions cannot grant organization access you do not have.")
-    print(f"Official client download/install and checksum: {CLIENT_URL}")
-    print("No OS account, group, service, browser, public endpoint or repository changes are performed.")
-    profile: Path | None = None
-    try:
-        if sys.platform != "linux" or os.getuid() == 0:
-            raise ValueError("Run on Linux as a non-root user")
-        if not sys.stdin.isatty() or not sys.stderr.isatty():
-            raise ValueError("Setup requires an interactive terminal; no credential was requested")
-        directory = _destination(args.directory)
-        client = args.tunnel_client.absolute()
-        if not client.is_file() or not os.access(client, os.X_OK):
-            raise ValueError("Install and verify the official client, then pass its executable via --tunnel-client")
-        print(f"New private directory: {directory}; writable workspace: {directory / 'workspace'}; tasks disabled.")
-        print("Use a least-privilege runtime account; this setup does not remove existing permissions (including Docker access).")
-        print("Do not include secrets in workspace files. Keep this private setup directory out of version control.")
-        tunnel_id = input("Tunnel ID from Platform settings: ").strip()
-        if not re.fullmatch(r"tunnel_[0-9a-f]{32}", tunnel_id):
-            raise ValueError("Invalid Tunnel ID; no credential was requested")
-        key = read_key()
-        profile = create_artifacts(directory, tunnel_id, key)
-        del key
-        print("Private key/config/profile saved; credential value not displayed. Existing files were not overwritten.")
-        _doctor(client, profile)
-        if configuration_callback is not None:
-            configuration_callback(profile)
-        command = shlex.join([str(client), "run", "--profile-file", str(profile)])
-        print(f"Manual foreground command (no secret argument): env -i HOME={shlex.quote(str(Path.home()))} PATH={shlex.quote(os.defpath)} LANG=C.UTF-8 {command}")
-        print("Stdio supports ONE active client per Tunnel. Do not start if another client already owns this Tunnel.")
-        answer = input("Start manual foreground connection now? [y/N]: ").strip().lower()
-        if answer in ("y", "yes"):
-            return _foreground(client, profile, tunnel_id)
-        _registration(tunnel_id)
-        print("NOT CONNECTED: start the printed foreground command before registering/testing the app; it must remain running.")
-        return 0
-    except ValueError as error:
-        if configuration_callback is not None and profile is not None:
-            print(f"Setup failed: {error}. Private files are preserved; rerun dotunnel setup to reconfigure this setup without replacing its key or profile.", file=sys.stderr)
-        else:
-            print(f"Setup failed: {error}. Private files already created are preserved; use a new directory to retry.", file=sys.stderr)
-        return 2
-    except (OSError, EOFError, subprocess.TimeoutExpired) as error:
-        if configuration_callback is not None and profile is not None:
-            print("Setup input or local files failed; private files are preserved. Rerun dotunnel setup to reconfigure this setup without replacing its key or profile.", file=sys.stderr)
-        else:
-            print(f"Setup failed ({type(error).__name__}); check local files/client or interrupted input. No key value is displayed; private files already created are preserved.", file=sys.stderr)
-        return 2
-    except KeyboardInterrupt:
-        print("\nSetup cancelled; private files already created are preserved, never overwritten.", file=sys.stderr)
-        return 130

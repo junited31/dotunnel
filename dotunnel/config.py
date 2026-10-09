@@ -9,7 +9,13 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 
-from .supervision_config import SupervisionSettings, parse_supervision
+from .file_access import FileAccess
+from .supervision_config import (
+    SupervisionSettings,
+    _parse_setup_draft_supervision,
+    _trusted_future_directory,
+    parse_supervision,
+)
 from .tasks import TaskSpec
 
 
@@ -17,8 +23,8 @@ from .tasks import TaskSpec
 class Config:
     root: Path
     tasks: list[TaskSpec]
+    file_access: FileAccess
     supervision: SupervisionSettings | None = None
-
 
 def _open_absolute(path: Path, flags: int) -> int:
     """Open each ancestor without following links (Linux only)."""
@@ -74,15 +80,49 @@ def load_config(path: Path | str) -> Config:
             raise ValueError("Configuration must be valid UTF-8 JSON") from None
     finally:
         os.close(fd)
-    data = _keys(data, {"root", "tasks"}, {"supervision"})
+    return _parse_document(data, path)
+
+
+def _parse_document(data: object, path: Path) -> Config:
+    return _parse_document_with_workspace(data, path, future_workspace=False)
+
+
+def _parse_setup_draft_document(
+    data: object,
+    path: Path,
+    *,
+    future_workspace: bool,
+) -> Config:
+    if not isinstance(data, dict) or "file_access" not in data:
+        raise ValueError("Setup configuration requires an explicit file access policy")
+    try:
+        encoded = (json.dumps(data, indent=2) + "\n").encode("utf-8")
+    except (TypeError, ValueError, UnicodeError):
+        raise ValueError("Setup configuration draft is not serializable") from None
+    if len(encoded) > 65536:
+        raise ValueError("Configuration exceeds 64 KiB")
+    return _parse_document_with_workspace(data, path, future_workspace=future_workspace)
+
+
+def _parse_document_with_workspace(data: object, path: Path, *, future_workspace: bool) -> Config:
+    data = _keys(data, {"root", "tasks", "file_access"}, {"supervision"})
+    file_access = FileAccess.parse(data["file_access"])
     if not isinstance(data["root"], str) or not data["root"] or "\x00" in data["root"]:
         raise ValueError("Invalid workspace root")
     root = Path(data["root"])
     if not root.is_absolute() or ".." in root.parts or root == Path("/") or root == Path.home():
         raise ValueError("Use an explicit project directory, not the filesystem root or home")
-    root_fd = _open_absolute(root, os.O_RDONLY | os.O_DIRECTORY)
-    os.close(root_fd)
-    if _within(path, root) or _within(Path(__file__).absolute().parent, root):
+    if future_workspace:
+        _trusted_future_directory(root, setup_directory=path.parent)
+    else:
+        root_fd = _open_absolute(root, os.O_RDONLY | os.O_DIRECTORY)
+        os.close(root_fd)
+    runtime_root = Path(__file__).absolute().parent
+    if (
+        _within(path, root)
+        or _within(runtime_root, root)
+        or _within(root, runtime_root)
+    ):
         raise ValueError("Config and MCP runtime code must be outside the writable workspace")
     if not isinstance(data["tasks"], list) or len(data["tasks"]) > 50:
         raise ValueError("Tasks must be a list of at most 50 definitions")
@@ -103,13 +143,21 @@ def load_config(path: Path | str) -> Config:
         cwd = task.get("cwd", ".")
         if not isinstance(cwd, str) or not cwd or "\x00" in cwd or Path(cwd).is_absolute() or ".." in Path(cwd).parts or any(part.startswith(".") for part in Path(cwd).parts if part != "."):
             raise ValueError("Task cwd must be an unhidden directory inside the workspace")
-        directory = root / cwd
-        directory_fd = _open_absolute(directory, os.O_RDONLY | os.O_DIRECTORY)
-        os.close(directory_fd)
+        if future_workspace:
+            if cwd != ".":
+                raise ValueError("Task cwd must already exist in a future workspace")
+        else:
+            directory_fd = _open_absolute(root / cwd, os.O_RDONLY | os.O_DIRECTORY)
+            os.close(directory_fd)
         timeout = task.get("timeout_seconds", 60)
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout <= 300:
             raise ValueError("Task timeout must be finite and within (0, 300] seconds")
         names.add(name)
-        specs.append(TaskSpec(name=name, description=description, argv=tuple(argv), cwd=directory, timeout_seconds=float(timeout)))
-    supervision = parse_supervision(data["supervision"], root, path) if "supervision" in data else None
-    return Config(root=root, tasks=specs, supervision=supervision)
+        specs.append(TaskSpec(name=name, description=description, argv=tuple(argv), cwd=root / cwd, timeout_seconds=float(timeout)))
+    if "supervision" not in data:
+        supervision = None
+    elif future_workspace:
+        supervision = _parse_setup_draft_supervision(data["supervision"], root, path)
+    else:
+        supervision = parse_supervision(data["supervision"], root, path)
+    return Config(root=root, tasks=specs, file_access=file_access, supervision=supervision)
