@@ -61,8 +61,6 @@ _RUNTIME_FIELDS = {
 }
 
 
-class _PublicationDurabilityUnconfirmed(ValueError):
-    """The config rename succeeded, but its directory entry durability is unknown."""
 
 @dataclass(frozen=True)
 class _Snapshot:
@@ -75,6 +73,15 @@ class _Snapshot:
     mtime_ns: int
     ctime_ns: int
     digest: str
+
+@dataclass(frozen=True)
+class _SupervisionStateSnapshot:
+    path: Path
+    root: tuple[int, int]
+    key_file: tuple[int, ...]
+    epoch_file: tuple[int, ...]
+    epoch: str
+    key_digest: bytes
 
 
 @dataclass
@@ -860,11 +867,10 @@ def _job_overview(task: dict[str, Any], backend: str) -> dict[str, Any]:
 def _new_task_document(
     document: dict[str, Any],
     workspace: Path,
-    available: dict[str, Path],
-    selected: set[str],
     overviews: dict[str, dict[str, Any]],
     prepared: list[_Prepared],
     replaced: set[str],
+    removals: set[str],
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     updated: list[dict[str, Any]] = []
     removed: list[dict[str, str]] = []
@@ -876,15 +882,15 @@ def _new_task_document(
         if backend is None:
             updated.append(task)
             continue
-        overview = overviews[backend]
-        keep_existing = (
-            backend in selected and backend not in replaced
-            or backend not in available and overview["workspace"] == workspace
-        )
-        if keep_existing:
-            updated.append(task)
+        if backend in removals:
+            removed.append({"backend": backend, "workspace": "not inspected"})
+        elif backend in replaced:
+            removed.append({
+                "backend": backend,
+                "workspace": str(overviews[backend]["workspace"]),
+            })
         else:
-            removed.append({"backend": backend, "workspace": str(overview["workspace"])})
+            updated.append(task)
     added = {item.backend for item in prepared if item.needs_write}
     command = _operator_command(workspace) if added else None
     for backend in SUPPORTED_CLIS:
@@ -1033,7 +1039,9 @@ def _write_registry(state: _State, document: dict[str, Any], expected: _Snapshot
         os.fsync(state.directory_fd)
     except (OSError, UnicodeError):
         if renamed:
-            raise _PublicationDurabilityUnconfirmed(
+            from .setup import ConfigPublicationUnconfirmed
+
+            raise ConfigPublicationUnconfirmed(
                 "the configuration rename succeeded, but directory durability could not be confirmed"
             ) from None
         raise ValueError("Setup registry could not be updated safely") from None
@@ -1086,6 +1094,7 @@ def _choose_fixed_jobs(
     sudo_fn: Callable[[], bool] | None = None,
     install_fn: Callable[[list[str]], bool] | None = None,
     install_argv_fn: Callable[[], list[str] | None] | None = None,
+    on_skip: Callable[[], None] | None = None,
 ) -> set[str] | None:
     available = _available(available)
     status_check = (
@@ -1113,6 +1122,8 @@ def _choose_fixed_jobs(
             "Install Bubblewrap in another terminal, then press Enter to check again, or type s to skip CLI integrations: ",
         ).casefold()
         if answer in ("s", "skip"):
+            if on_skip is not None:
+                on_skip()
             print("Optional CLI integrations skipped; no setup changes have been saved.")
             print(f"After installing Bubblewrap, run `dotunnel setup --directory {directory}` to enable them.")
             return set()
@@ -1227,22 +1238,90 @@ def _initial_config_matches(directory_fd: int, document: dict[str, Any]) -> bool
     return raw == (json.dumps(document, indent=2) + "\n").encode("utf-8")
 
 
-def _supervision_state_exists(path: Path) -> bool:
-    from .setup import _trusted_parent
-
+def _supervision_file_identity(authority: Any, name: str) -> tuple[int, ...]:
+    fd = os.open(name, _PRIVATE_READ_FLAGS, dir_fd=authority._dir_fd)
     try:
-        parent_fd = _trusted_parent(path.parent)
-        try:
-            fd = os.open(path.name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
-        finally:
-            os.close(parent_fd)
-        try:
-            info = os.fstat(fd)
-            return info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o700
-        finally:
-            os.close(fd)
+        info = os.fstat(fd)
+    finally:
+        os.close(fd)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.getuid()
+        or info.st_nlink != 1
+        or stat.S_IMODE(info.st_mode) != 0o600
+    ):
+        raise ValueError("Existing live supervision state is unsafe")
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_nlink,
+        info.st_uid,
+        stat.S_IMODE(info.st_mode),
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def _supervision_state_snapshot(path: Path) -> _SupervisionStateSnapshot:
+    from .supervision_state import SupervisionState
+
+    authority = None
+    try:
+        authority = SupervisionState(path)
+
+        def root_identity() -> tuple[int, int]:
+            opened = os.fstat(authority._dir_fd)
+            visible = os.stat(authority.path, follow_symlinks=False)
+            if (
+                not stat.S_ISDIR(opened.st_mode)
+                or not stat.S_ISDIR(visible.st_mode)
+                or opened.st_uid != os.getuid()
+                or stat.S_IMODE(opened.st_mode) != 0o700
+                or (opened.st_dev, opened.st_ino) != (visible.st_dev, visible.st_ino)
+            ):
+                raise ValueError("Existing live supervision state changed")
+            return opened.st_dev, opened.st_ino
+
+        root_before = root_identity()
+        key_before = _supervision_file_identity(authority, "key")
+        epoch_before = _supervision_file_identity(authority, "epoch.json")
+        epoch = authority.epoch
+        key_digest = hashlib.sha256(authority.key).digest()
+        key_after = _supervision_file_identity(authority, "key")
+        epoch_after = _supervision_file_identity(authority, "epoch.json")
+        root_after = root_identity()
+        if (
+            root_before != root_after
+            or key_before != key_after
+            or epoch_before != epoch_after
+        ):
+            raise ValueError("Existing live supervision state changed")
+        return _SupervisionStateSnapshot(
+            authority.path,
+            root_after,
+            key_after,
+            epoch_after,
+            epoch,
+            key_digest,
+        )
     except (OSError, TypeError, ValueError):
-        return False
+        raise ValueError(
+            "Existing live supervision state is missing, invalid, or changed; "
+            "setup will not save or reinitialize it"
+        ) from None
+    finally:
+        if authority is not None:
+            authority.close()
+
+
+def _assert_supervision_state_unchanged(
+    expected: _SupervisionStateSnapshot | None,
+) -> None:
+    if expected is not None and _supervision_state_snapshot(expected.path) != expected:
+        raise ValueError(
+            "Existing live supervision state changed; configuration was not published"
+        )
 
 
 def _initialize_supervision_state(
@@ -1532,7 +1611,6 @@ def _client_path(value: Path | None) -> Path:
     return client
 
 
-
 def _require_interactive_terminal() -> None:
     try:
         interactive = sys.stdin.isatty() and sys.stderr.isatty()
@@ -1542,16 +1620,11 @@ def _require_interactive_terminal() -> None:
         raise ValueError("Setup onboarding requires an interactive terminal")
 
 
-
-
-
-
-
-
 def main(argv: list[str] | None = None) -> int:
     from . import permission_setup, setup
 
     state: _State | None = None
+    supervision_snapshot: _SupervisionStateSnapshot | None = None
     staged: list[_CreatedEntry] = []
     workspace_entry: _CreatedEntry | None = None
     private_handles: tuple[int, int, int, int] | None = None
@@ -1582,12 +1655,9 @@ def main(argv: list[str] | None = None) -> int:
             document = copy.deepcopy(state.document)
             active = _owned_tasks(document, directory)
             if document.get("supervision") is not None:
-                state_path = Path(document["supervision"]["state_dir"])
-                if not _supervision_state_exists(state_path):
-                    raise ValueError(
-                        "Existing live supervision state is missing or unsafe; ownership is unknown "
-                        "and setup will not save or reinitialize it"
-                    )
+                supervision_snapshot = _supervision_state_snapshot(
+                    Path(document["supervision"]["state_dir"])
+                )
             _require_stopped_client(client, directory / _PROFILE)
             if not _confirm_no_other_client(None):
                 print("No external-client attestation; existing setup was not changed.")
@@ -1632,14 +1702,37 @@ def main(argv: list[str] | None = None) -> int:
                 "Fixed native CLI jobs are unavailable; no chmod will be attempted."
             )
             available = {}
-        initial = set(active) & set(available)
-        selected = _choose_fixed_jobs(available, initial, directory)
+        selection_skipped = False
+
+        def mark_selection_skipped() -> None:
+            nonlocal selection_skipped
+            selection_skipped = True
+
+        selected = _choose_fixed_jobs(
+            available,
+            initial,
+            directory,
+            on_skip=mark_selection_skipped,
+        )
         if selected is None:
             return 130
 
+        removals: set[str] = set()
+        for backend in SUPPORTED_CLIS:
+            if backend not in active or backend in selected:
+                continue
+            if backend in available and not selection_skipped:
+                removals.add(backend)
+            elif permission_setup.confirm(
+                None,
+                f"Remove the existing setup-owned {CLI_LABELS[backend]} task registration? [y/N]: ",
+                default=False,
+            ):
+                removals.add(backend)
         overviews = {
             backend: _job_overview(task, backend)
             for backend, task in active.items()
+            if backend not in removals
         }
         replaced = {
             backend for backend in selected
@@ -1661,11 +1754,10 @@ def main(argv: list[str] | None = None) -> int:
         updated_tasks, removed_jobs = _new_task_document(
             document,
             draft.workspace,
-            available,
-            selected,
             overviews,
             prepared,
             replaced,
+            removals,
         )
         updated_document = copy.deepcopy(document)
         updated_document["root"] = str(draft.workspace)
@@ -1687,7 +1779,7 @@ def main(argv: list[str] | None = None) -> int:
                 integrations._load_managed_job(
                     Path(detail["config"]),
                     backend,
-                    draft.workspace,
+                    Path(detail["workspace"]),
                     bwrap_path=_BWRAP,
                 )
                 job_details.append(detail)
@@ -1749,6 +1841,7 @@ def main(argv: list[str] | None = None) -> int:
             setup._destination(directory)
         else:
             _assert_registry_snapshot(state, state.snapshot)
+        _assert_supervision_state_unchanged(supervision_snapshot)
         if draft.create_workspace:
             if os.path.lexists(draft.workspace):
                 raise ValueError("New workspace path appeared during setup review; nothing was changed")
@@ -1853,10 +1946,11 @@ def main(argv: list[str] | None = None) -> int:
             )
         if state is not None:
             _assert_registry_snapshot(state, state.snapshot)
+            _assert_supervision_state_unchanged(supervision_snapshot)
             expected_registry = (json.dumps(updated_document, indent=2) + "\n").encode("utf-8")
             try:
                 _write_registry(state, updated_document, state.snapshot)
-            except _PublicationDurabilityUnconfirmed:
+            except setup.ConfigPublicationUnconfirmed:
                 published = True
                 raise
             except BaseException:
@@ -1884,6 +1978,9 @@ def main(argv: list[str] | None = None) -> int:
                     updated_document,
                     expected_directory=(private_handles[2], private_handles[3]),
                 )
+            except setup.ConfigPublicationUnconfirmed:
+                published = True
+                raise
             except BaseException as error:
                 published = (
                     _private_directory_matches(directory, private_handles)
@@ -1892,7 +1989,7 @@ def main(argv: list[str] | None = None) -> int:
                     and _initial_config_matches(private_handles[1], updated_document)
                 )
                 if published and isinstance(error, (OSError, ValueError)):
-                    raise _PublicationDurabilityUnconfirmed(
+                    raise setup.ConfigPublicationUnconfirmed(
                         "the configuration is published, but directory durability could not be confirmed"
                     ) from None
                 raise
@@ -1934,6 +2031,9 @@ def main(argv: list[str] | None = None) -> int:
             default=False,
         ):
             print("Setup was saved; the Tunnel client remains stopped.")
+            manual_argv = [str(client), "run", "--profile-file", str(profile)]
+            print(f"To start later in the foreground: {shlex.join(manual_argv)}")
+            setup._registration(tunnel_id)
             return 0
         try:
             return setup._foreground(client, profile, tunnel_id)
@@ -1944,9 +2044,10 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
-    except _PublicationDurabilityUnconfirmed as error:
+    except setup.ConfigPublicationUnconfirmed as error:
+        published = True
         print(
-            f"Setup was saved; private configuration references are published, but directory durability is unconfirmed ({error}). "
+            f"Setup configuration publication is unconfirmed; private references were preserved for reconciliation ({error}). "
             "No Tunnel connection was started.",
             file=sys.stderr,
         )

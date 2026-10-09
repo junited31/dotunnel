@@ -295,12 +295,39 @@ class RetainedSetupTests(unittest.TestCase):
 
         status, stdout, _stderr, prompts = self._run_existing(
             fixture,
-            ["", "", "", "s", ""],
+            ["", "", "", ""],
             installed={},
             bwrap_status="missing",
         )
 
         self.assertEqual(status, 2)
+        self.assertEqual(self._file_snapshot(fixture["config"]), before)
+        self.assertEqual(
+            json.loads(fixture["config"].read_text(encoding="utf-8"))["tasks"],
+            [fixture["task"], fixture["unowned_task"]],
+        )
+        for path, snapshot in artifacts.items():
+            self.assertEqual(self._file_snapshot(path), snapshot)
+
+    def test_bubblewrap_skip_preserves_an_available_existing_registration_by_default(self):
+        fixture = self._add_codex_task(
+            self._new_setup("bubblewrap-skip"),
+            missing_executable=False,
+        )
+        before = self._file_snapshot(fixture["config"])
+        artifacts = {
+            path: self._file_snapshot(path)
+            for path in (fixture["job_path"], fixture["request_path"], fixture["source_file"])
+        }
+
+        status, _stdout, stderr, _prompts = self._run_existing(
+            fixture,
+            ["", "", "", "s", "", "y", ""],
+            installed={"codex": self.base / "discovered-codex"},
+            bwrap_status="missing",
+        )
+
+        self.assertEqual(status, 0, stderr)
         self.assertEqual(self._file_snapshot(fixture["config"]), before)
         self.assertEqual(
             json.loads(fixture["config"].read_text(encoding="utf-8"))["tasks"],
@@ -342,7 +369,7 @@ class RetainedSetupTests(unittest.TestCase):
 
         status, stdout, stderr, _prompts = self._run_existing(
             fixture,
-            ["", "", "", "s", "y", "y", ""],
+            ["", "", "", "y", "y", ""],
             installed={},
             bwrap_status="missing",
         )
@@ -356,6 +383,30 @@ class RetainedSetupTests(unittest.TestCase):
         for path, snapshot in artifacts.items():
             self.assertTrue(path.is_file())
             self.assertEqual(self._file_snapshot(path), snapshot)
+
+    def test_explicit_removal_precedes_reading_malformed_job_details(self):
+        fixture = self._add_codex_task(
+            self._new_setup("malformed-job"),
+            missing_executable=False,
+        )
+        fixture["job_path"].write_bytes(b"{malformed private job")
+        fixture["job_path"].chmod(0o600)
+        old_job = self._file_snapshot(fixture["job_path"])
+        old_request = self._file_snapshot(fixture["request_path"])
+        old_source = self._file_snapshot(fixture["source_file"])
+
+        status, _stdout, stderr, _prompts = self._run_existing(
+            fixture,
+            ["", "", "", "y", "y", ""],
+            installed={},
+        )
+
+        self.assertEqual(status, 0, stderr)
+        final = json.loads(fixture["config"].read_text(encoding="utf-8"))
+        self.assertEqual(final["tasks"], [fixture["unowned_task"]])
+        self.assertEqual(self._file_snapshot(fixture["job_path"]), old_job)
+        self.assertEqual(self._file_snapshot(fixture["request_path"]), old_request)
+        self.assertEqual(self._file_snapshot(fixture["source_file"]), old_source)
 
     def test_retained_task_with_missing_runtime_is_still_fully_validated(self):
         fixture = self._add_codex_task(self._new_setup("retained-invalid"))
@@ -377,12 +428,40 @@ class RetainedSetupTests(unittest.TestCase):
         for path, snapshot in artifacts.items():
             self.assertEqual(self._file_snapshot(path), snapshot)
 
+    def test_retained_job_must_match_the_reviewed_workspace_before_publication(self):
+        fixture = self._add_codex_task(
+            self._new_setup("changed-workspace"), missing_executable=False,
+        )
+        document = json.loads(fixture["config"].read_text(encoding="utf-8"))
+        document["file_access"] = {"read": [], "write": []}
+        fixture["config"].write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        alternate = fixture["base"] / "alternate-workspace"
+        alternate.mkdir(mode=0o700)
+        alternate.chmod(0o700)
+        paths = (fixture["config"], fixture["job_path"], fixture["request_path"], fixture["source_file"])
+        before = {path: self._file_snapshot(path) for path in paths}
+
+        status, _stdout, stderr, _prompts = self._run_existing(
+            fixture,
+            ["e", str(alternate), "", "", "", "y", ""],
+            installed={},
+        )
+
+        self.assertEqual(status, 2, stderr)
+        for path, snapshot in before.items():
+            self.assertEqual(self._file_snapshot(path), snapshot)
+        self.assertEqual(
+            json.loads(fixture["config"].read_text(encoding="utf-8"))["root"],
+            str(fixture["workspace"]),
+        )
+
     def test_invalid_persisted_supervision_state_fails_read_only_before_approval(self):
         from dotunnel.supervision_state import SupervisionState
 
         corruptions = (
             ("missing-key", lambda path: (path / "key").unlink()),
             ("malformed-key", lambda path: (path / "key").write_bytes(b"short")),
+            ("missing-epoch", lambda path: (path / "epoch.json").unlink()),
             ("malformed-epoch", lambda path: (path / "epoch.json").write_bytes(b"{bad json")),
             ("missing-category", lambda path: (path / "receipts").rmdir()),
         )
@@ -406,6 +485,7 @@ class RetainedSetupTests(unittest.TestCase):
                 )
 
                 self.assertEqual(status, 2, stderr)
+                self.assertEqual(prompts, [])
                 self.assertEqual(self._file_snapshot(fixture["config"]), config_before)
                 self.assertEqual(self._state_snapshot(fixture["state_path"]), state_before)
 
@@ -416,13 +496,14 @@ class RetainedSetupTests(unittest.TestCase):
         replacement.chmod(0o600)
         os.replace(replacement, path)
 
-    def _change_to_a_different_valid_state(self, state_path):
+    def _change_to_a_different_valid_state(self, state_path, *, rotate_epoch):
         from dotunnel.supervision_state import SupervisionState
 
         replacement_key = bytes(range(32))
         metadata_path = state_path / "epoch.json"
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        metadata["epoch"] = "f" * 32
+        if rotate_epoch:
+            metadata["epoch"] = "f" * 32
         metadata["key_sha256"] = hashlib.sha256(replacement_key).hexdigest()
         self._replace_state_file(state_path / "key", replacement_key)
         self._replace_state_file(
@@ -435,28 +516,32 @@ class RetainedSetupTests(unittest.TestCase):
     def test_valid_supervision_state_changed_after_review_blocks_publication(self):
         from dotunnel.supervision_state import SupervisionState
 
-        fixture = self._add_supervision(self._new_setup("changed-authority"))
-        config_before = self._file_snapshot(fixture["config"])
-        changed_state = []
+        for rotate_epoch in (True, False):
+            with self.subTest(rotate_epoch=rotate_epoch):
+                fixture = self._add_supervision(self._new_setup(f"changed-authority-{rotate_epoch}"))
+                config_before = self._file_snapshot(fixture["config"])
+                changed_state = []
 
-        def answer(_prompt, count):
-            if count == 4:
-                self._change_to_a_different_valid_state(fixture["state_path"])
-                changed_state.append(self._state_snapshot(fixture["state_path"]))
-                return "y"
-            return ""
+                def answer(_prompt, count):
+                    if count == 4:
+                        self._change_to_a_different_valid_state(
+                            fixture["state_path"], rotate_epoch=rotate_epoch,
+                        )
+                        changed_state.append(self._state_snapshot(fixture["state_path"]))
+                        return "y"
+                    return ""
 
-        status, _stdout, stderr, _seen = self._run_existing(
-            fixture,
-            installed={},
-            prompt_callback=answer,
-        )
+                status, _stdout, stderr, _seen = self._run_existing(
+                    fixture,
+                    installed={},
+                    prompt_callback=answer,
+                )
 
-        self.assertEqual(status, 2, stderr)
-        self.assertEqual(self._file_snapshot(fixture["config"]), config_before)
-        self.assertEqual(self._state_snapshot(fixture["state_path"]), changed_state[0])
-        authority = SupervisionState(fixture["state_path"])
-        authority.close()
+                self.assertEqual(status, 2, stderr)
+                self.assertEqual(self._file_snapshot(fixture["config"]), config_before)
+                self.assertEqual(self._state_snapshot(fixture["state_path"]), changed_state[0])
+                authority = SupervisionState(fixture["state_path"])
+                authority.close()
 
 
 if __name__ == "__main__":

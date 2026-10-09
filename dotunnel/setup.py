@@ -24,6 +24,48 @@ from .config import _open_absolute, load_config
 PLUGINS_URL = "https://chatgpt.com/plugins"
 
 
+class ConfigPublicationUnconfirmed(ValueError):
+    """A config rename occurred or its outcome cannot be established safely."""
+
+
+def _initial_rename_outcome(
+    directory_fd: int,
+    temporary: str,
+    identity: tuple[int, int] | None,
+) -> bool | None:
+    """Return whether the staged config definitely was or was not renamed."""
+    if identity is None:
+        return None
+    try:
+        temporary_info = os.stat(temporary, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        temporary_info = None
+    except OSError:
+        return None
+    try:
+        config_info = os.stat("config.json", dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        config_info = None
+    except OSError:
+        return None
+
+    def is_staged_file(info: os.stat_result | None) -> bool:
+        return (
+            info is not None
+            and stat.S_ISREG(info.st_mode)
+            and info.st_uid == os.getuid()
+            and stat.S_IMODE(info.st_mode) == 0o600
+            and info.st_nlink == 1
+            and (info.st_dev, info.st_ino) == identity
+        )
+
+    if is_staged_file(temporary_info) and config_info is None:
+        return False
+    if temporary_info is None and is_staged_file(config_info):
+        return True
+    return None
+
+
 def _trusted_parent(path: Path, *, root_only: bool = False) -> int:
     """Return a no-follow fd only for ancestors protected from untrusted writes."""
     fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
@@ -197,6 +239,7 @@ def publish_initial_config(
         raise
     temporary = f".config.json.{uuid.uuid4().hex}.tmp"
     created = False
+    temporary_identity: tuple[int, int] | None = None
     try:
         opened = os.fstat(directory_fd)
         visible = os.stat(directory.name, dir_fd=parent_fd, follow_symlinks=False)
@@ -218,6 +261,8 @@ def publish_initial_config(
         created = True
         try:
             os.fchmod(fd, 0o600)
+            info = os.fstat(fd)
+            temporary_identity = (info.st_dev, info.st_ino)
             offset = 0
             while offset < len(raw):
                 written = os.write(fd, raw[offset:])
@@ -239,15 +284,38 @@ def publish_initial_config(
             pass
         else:
             raise ValueError("Setup config appeared before initial publication")
-        os.rename(temporary, "config.json", src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
-        created = False
-        os.fsync(directory_fd)
+        try:
+            os.rename(temporary, "config.json", src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+            created = False
+            os.fsync(directory_fd)
+        except BaseException as error:
+            try:
+                rename_outcome = (
+                    True
+                    if not created
+                    else _initial_rename_outcome(directory_fd, temporary, temporary_identity)
+                )
+            except BaseException:
+                rename_outcome = None
+            if rename_outcome is False:
+                raise
+            raise ConfigPublicationUnconfirmed(
+                "The initial config rename occurred or its outcome is uncertain; directory durability is unconfirmed"
+            ) from error
     except OSError:
         raise ValueError("The private setup configuration could not be published safely") from None
     finally:
-        if created:
+        if created and temporary_identity is not None:
             try:
-                os.unlink(temporary, dir_fd=directory_fd)
+                info = os.stat(temporary, dir_fd=directory_fd, follow_symlinks=False)
+                if (
+                    stat.S_ISREG(info.st_mode)
+                    and info.st_uid == os.getuid()
+                    and stat.S_IMODE(info.st_mode) == 0o600
+                    and info.st_nlink == 1
+                    and (info.st_dev, info.st_ino) == temporary_identity
+                ):
+                    os.unlink(temporary, dir_fd=directory_fd)
             except OSError:
                 pass
         os.close(directory_fd)
@@ -364,14 +432,15 @@ def _stop(process: subprocess.Popen) -> None:
         signal.signal(signal.SIGINT, previous)
 
 
-def _registration(tunnel_id: str) -> None:
+def _registration(tunnel_id: str | None) -> None:
     print(f"ChatGPT registration: {PLUGINS_URL}")
-    print(f"Create a custom MCP app; Connection = Tunnel; select/paste {tunnel_id}.")
+    if tunnel_id:
+        print(f"Create a custom MCP app; Connection = Tunnel; select/paste {tunnel_id}.")
     print("This local stdio MCP has no separate OAuth; its Platform runtime key is NOT an app authentication field.")
     print("In ChatGPT, select your registered app (menu location varies by account/UI), then send a file-list request to verify tools.")
 
 
-def _foreground(client: Path, profile: Path, tunnel_id: str) -> int:
+def _foreground(client: Path, profile: Path, tunnel_id: str | None) -> int:
     process = subprocess.Popen(
         [str(client), "run", "--profile-file", str(profile)],
         env=_environment(), start_new_session=True,

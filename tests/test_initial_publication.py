@@ -92,10 +92,12 @@ class InitialPublicationTests(unittest.TestCase):
             if not is_initial_config:
                 return real_rename(source, destination, *args, **kwargs)
             state["config_rename_attempted"] = True
+            pending = json.loads((self.directory / source).read_text(encoding="utf-8"))
+            state["authority_path"] = pending["supervision"]["state_dir"]
             if fault == "before-rename":
                 raise OSError("injected failure before initial config rename")
             from dotunnel.supervision_state import SupervisionState
-            authority = SupervisionState(self.directory / "supervision")
+            authority = SupervisionState(Path(state["authority_path"]))
             try:
                 state["expected_epoch"] = authority.epoch
             finally:
@@ -199,7 +201,7 @@ class InitialPublicationTests(unittest.TestCase):
         status, _stdout, _stderr, fault = self._run_onboarding("after-rename")
 
         self.assertTrue(fault["config_rename_attempted"])
-        self.assertTrue(fault["config_renamed"])
+        self.assertTrue(fault["config_renamed"], _stderr)
         self.assertTrue(fault["directory_fsync_failed"])
         self.assertEqual(status, 2)
         self.assertTrue((self.directory / "config.json").is_file())
@@ -217,7 +219,7 @@ class InitialPublicationTests(unittest.TestCase):
         self.assertFalse((self.directory / "config.json").exists())
         self.assertFalse(self.workspace.exists())
         self.assertFalse((self.directory / "native-cli").exists())
-        self.assertFalse((self.directory / "supervision").exists())
+        self.assertFalse(Path(fault["authority_path"]).exists())
         self.assertFalse(self.start_marker.exists())
 
 
