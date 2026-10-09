@@ -85,7 +85,7 @@ class ReleaseVerifyCIWatchdogTests(unittest.TestCase):
             f"LOG_PATH={str(log_path)!r}\n"
             f"CONTAINER_ID={_CONTAINER_ID!r}\n"
             f"CONTAINER_NAME={_OWNED_NAME!r}\n"
-            f"DETAILS=json.loads({json.dumps(json.dumps(details, separators=(',', ':')))!r})\n"
+            f"DETAILS=json.loads({json.dumps(json.dumps(details, separators=(',', ':')))})\n"
             "def load():\n"
             "    with open(STATE_PATH,encoding='utf-8') as stream: return json.load(stream)\n"
             "def save(value):\n"
