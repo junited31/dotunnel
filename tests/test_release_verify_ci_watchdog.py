@@ -39,6 +39,11 @@ class ReleaseVerifyCIWatchdogTests(unittest.TestCase):
         cls.addClassCleanup(sys.modules.pop, name, None)
         spec.loader.exec_module(cls.api)
 
+    def setUp(self):
+        fixture = tempfile.TemporaryDirectory(prefix="case-", dir=self.fixture_root)
+        self.addCleanup(fixture.cleanup)
+        self.fixture_root = Path(fixture.name)
+
     def _ledger(self, *, container_id=None):
         return {
             "schema": 1,
