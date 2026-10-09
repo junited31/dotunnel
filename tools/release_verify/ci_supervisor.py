@@ -1528,7 +1528,10 @@ def _write_atomic(path: Path, data: bytes, root: Path) -> None:
             src_dir_fd=directory_fd, dst_dir_fd=directory_fd,
         )
         temp_name = None
-        if _private_metadata_at(directory_fd, "ledger.json") != temp_identity:
+        # Rename changes ctime; the held inode's other fields must stay stable.
+        committed_identity = _private_metadata_identity(os.fstat(temp_fd))
+        if (committed_identity[:-1] != temp_identity[:-1]
+                or _private_metadata_at(directory_fd, "ledger.json") != committed_identity):
             raise ValueError("atomic ledger destination identity changed")
         os.fsync(directory_fd)
         _assert_open_private_root(root, directory_fd, root_identity)
