@@ -1,10 +1,10 @@
 #!/bin/sh
 set -eu
 
-WHEEL_VERSION='0.1.5'
-WHEEL_URL='https://github.com/junited31/dotunnel/releases/download/v0.1.5/dotunnel-0.1.5-py3-none-any.whl'
-WHEEL_SHA256='5b617552d1d9dbaabd4209a99f42c4a25e7757fad8c3e9a0e684d9f01a949810'
-WHEEL_BYTES=123908
+WHEEL_VERSION='0.1.6'
+WHEEL_URL='https://github.com/junited31/dotunnel/releases/download/v0.1.6/dotunnel-0.1.6-py3-none-any.whl'
+WHEEL_SHA256='17f5c95c215f29028bf9a7ce8b563a8bf5e013437b55c61179d5952979f79de1'
+WHEEL_BYTES=142242
 
 usage() {
     cat <<EOF
