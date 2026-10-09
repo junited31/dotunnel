@@ -888,7 +888,8 @@ def _bounded_command(
             if drain_deadline is not None and now >= drain_deadline:
                 for key in list(selector.get_map().values()):
                     selector.unregister(key.fileobj)
-                    key.fileobj.close()
+                    stream = process.stdout if key.data == "stdout" else process.stderr
+                    stream.close()
                 break
             if now >= deadline and not timed_out:
                 timed_out = True
