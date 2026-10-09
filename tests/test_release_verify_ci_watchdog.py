@@ -165,17 +165,6 @@ class ReleaseVerifyCIWatchdogTests(unittest.TestCase):
             stack.enter_context(redirect_stdout(io.StringIO()))
             exit_status = api._watchdog(root, "f" * 64)
         return exit_status
-[/home/ai/.herdr/worktrees/dotunnel-mcp/feat-release-verification/tests/test_release_verify_ci_watchdog.py#13AB]
-PUT 152.=159:
-                ("_ledger_write", maybe_fail_reconciliation if fail_reconciliation else original_write),
-            ):
-                if name in {"_current_process_matches", "_ledger_write"}:
-                    stack.enter_context(patch.object(api, name, side_effect=value))
-                else:
-                    stack.enter_context(patch.object(api, name, return_value=value))
-            stack.enter_context(redirect_stdout(io.StringIO()))
-            exit_status = api._watchdog(root, "f" * 64)
-        return exit_status
 
     def _new_root(self, name):
         root = self.fixture_root / name
