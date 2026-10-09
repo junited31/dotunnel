@@ -18,7 +18,7 @@ front page의 한 줄 명령은 GitHub 로그인 없이 공개 저장소 `main`�
 
 ### 수동 설치
 
-내려받은 shell 스크립트를 실행하고 싶지 않다면 v0.1.5 release wheel을 직접 다운로드하세요. GitHub 로그인과 `gh`는 필요하지 않습니다. 설치 **전에** 기대하는 byte 수와 SHA-256을 모두 확인하세요.
+내려받은 shell 스크립트를 실행하고 싶지 않다면 v0.1.6 release wheel을 직접 다운로드하세요. GitHub 로그인과 `gh`는 필요하지 않습니다. 설치 **전에** 기대하는 byte 수와 SHA-256을 모두 확인하세요.
 
 ```sh
 set -eu
@@ -30,12 +30,12 @@ if [ -e "$install" ] || [ -L "$install" ]; then
 fi
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-wheel="$tmp/dotunnel-0.1.5-py3-none-any.whl"
+wheel="$tmp/dotunnel-0.1.6-py3-none-any.whl"
 curl --fail --location --output "$wheel" \
-  https://github.com/junited31/dotunnel/releases/download/v0.1.5/dotunnel-0.1.5-py3-none-any.whl
-test "$(wc -c < "$wheel")" -eq 123908
+  https://github.com/junited31/dotunnel/releases/download/v0.1.6/dotunnel-0.1.6-py3-none-any.whl
+test "$(wc -c < "$wheel")" -eq 142242
 printf '%s  %s\n' \
-  5b617552d1d9dbaabd4209a99f42c4a25e7757fad8c3e9a0e684d9f01a949810 \
+  17f5c95c215f29028bf9a7ce8b563a8bf5e013437b55c61179d5952979f79de1 \
   "$wheel" | sha256sum --check -
 python3 -I -m venv "$install"
 "$install/bin/python" -I -m pip --isolated install --only-binary :all: "$wheel"

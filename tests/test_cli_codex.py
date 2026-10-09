@@ -411,7 +411,7 @@ class NativeCodexTransportTests(unittest.TestCase):
         while time.monotonic() < end:
             try:
                 state = Path(f"/proc/{child_pid}/stat").read_text(encoding="ascii").rsplit(") ", 1)[1].split()[0]
-            except FileNotFoundError:
+            except (FileNotFoundError, ProcessLookupError):
                 break
             if state in {"Z", "X"}:
                 break
@@ -439,7 +439,7 @@ class NativeCodexTransportTests(unittest.TestCase):
         while time.monotonic() < end:
             try:
                 state = Path(f"/proc/{child_pid}/stat").read_text(encoding="ascii").rsplit(") ", 1)[1].split()[0]
-            except FileNotFoundError:
+            except (FileNotFoundError, ProcessLookupError):
                 break
             if state in {"Z", "X"}:
                 break

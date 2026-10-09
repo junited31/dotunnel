@@ -8,6 +8,8 @@
 - Make legacy migration explicit and fail closed when an existing local client is active or its state is unknown. Translate old supervision rights and preserve legacy whole-workspace read/write access unless the operator narrows it during review; require separate confirmation that no other client is using the Tunnel. Runtime configuration now requires `file_access`: migrate older configurations before restarting with 0.1.6; package installation alone does not migrate them.
 - Allow explicitly reviewed unregistration of unavailable setup-owned CLI jobs without deleting prior artifacts; keep registrations by default when optional integration configuration is skipped. Validate retained jobs against the reviewed workspace and recheck persisted supervision authority read-only before publication. Preserve referenced artifacts when initial publication is unconfirmed, and show safe manual-start/registration guidance on saved-but-not-started paths.
 - Include every prospective registered task's effective command in the final permission review, retain the foreground launcher's clean environment in manual startup commands, and align CLI help with integrated permission migration.
+- Advance the stable installer and bilingual manual-install examples to the published 0.1.6 wheel, pinned to 142242 bytes and SHA-256 `17f5c95c215f29028bf9a7ce8b563a8bf5e013437b55c61179d5952979f79de1`; preserve already-published release assets.
+- Treat both missing procfs entries and processes disappearing during a procfs read as successful process-exit observations in Linux cleanup regressions; retain the surviving-descendant assertions and runtime cleanup behavior.
 
 ## 0.1.5 (2026-10-08)
 

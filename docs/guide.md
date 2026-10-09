@@ -18,7 +18,7 @@ The public installer uses `$HOME/.local/share/dotunnel/venv` and exposes `$HOME/
 
 ### Manual installation
 
-To avoid executing a downloaded shell script, download the v0.1.5 release wheel directly. GitHub authentication and `gh` are not required. Check both the expected byte count and SHA-256 **before** installing:
+To avoid executing a downloaded shell script, download the v0.1.6 release wheel directly. GitHub authentication and `gh` are not required. Check both the expected byte count and SHA-256 **before** installing:
 
 ```sh
 set -eu
@@ -30,12 +30,12 @@ if [ -e "$install" ] || [ -L "$install" ]; then
 fi
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-wheel="$tmp/dotunnel-0.1.5-py3-none-any.whl"
+wheel="$tmp/dotunnel-0.1.6-py3-none-any.whl"
 curl --fail --location --output "$wheel" \
-  https://github.com/junited31/dotunnel/releases/download/v0.1.5/dotunnel-0.1.5-py3-none-any.whl
-test "$(wc -c < "$wheel")" -eq 123908
+  https://github.com/junited31/dotunnel/releases/download/v0.1.6/dotunnel-0.1.6-py3-none-any.whl
+test "$(wc -c < "$wheel")" -eq 142242
 printf '%s  %s\n' \
-  5b617552d1d9dbaabd4209a99f42c4a25e7757fad8c3e9a0e684d9f01a949810 \
+  17f5c95c215f29028bf9a7ce8b563a8bf5e013437b55c61179d5952979f79de1 \
   "$wheel" | sha256sum --check -
 python3 -I -m venv "$install"
 "$install/bin/python" -I -m pip --isolated install --only-binary :all: "$wheel"
