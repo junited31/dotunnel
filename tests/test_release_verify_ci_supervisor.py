@@ -55,6 +55,22 @@ class ReleaseVerifyCISupervisorTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.supervisor._source_identity()
 
+    def test_valid_json_with_truncated_stderr_cannot_be_inspection_evidence(self):
+        result = self.supervisor._CommandResult(
+            0, b'{"Id":"owned"}', b"stderr limit exceeded", False, False, True, 0.01,
+        )
+        self.assertIsNone(self.supervisor._parse_json_output(result))
+
+    def test_duplicate_pid_rows_cannot_prove_fork_tree(self):
+        row = f"{os.getpid()} {os.getppid()}\n".encode("ascii")
+        result = self.supervisor._CommandResult(
+            0, b"PID PPID\n" + row * 4, b"", False, False, False, 0.01,
+        )
+        with patch.object(self.supervisor, "_docker_command", return_value=result):
+            self.assertIsNone(self.supervisor._docker_top(
+                "/synthetic/docker", "b" * 64, self.fixture_root,
+            ))
+
 
     @staticmethod
     def _spec_value(stage="capabilities", **extra):
@@ -197,7 +213,7 @@ class ReleaseVerifyCISupervisorTests(unittest.TestCase):
             )
             input_file = str(input_root / "fixture.bin") if input_root else ""
             script = (
-                "import json,os,sys,time\n"
+                "import json,os,resource,signal,sys,time\n"
                 f"STATE_PATH={str(state_path)!r}\n"
                 f"LOG_PATH={str(log_path)!r}\n"
                 f"EFFECT_PATH={str(effect_path)!r}\n"
@@ -231,7 +247,7 @@ class ReleaseVerifyCISupervisorTests(unittest.TestCase):
                 "    if MUTATE_INPUT:\n"
                 "        with open(INPUT_FILE,'r+b') as stream:\n"
                 "            stream.seek(0); stream.write(b'changed!'); stream.flush(); os.fsync(stream.fileno())\n"
-                "    state['running']=True; state['attach_pid']=os.getpid(); save_state(state); log('start')\n"
+                "    state['running']=True; state['attach_pid']=os.getpid(); state['attach_parent']=os.getppid(); save_state(state); log('start')\n"
                 "    ready={'phase':'ready','run_id':"
                 + repr(_RUN_ID)
                 + ",'ok':True,'root_read_only':True,'tmpfs':True,'tmpfs_bytes':268435456,"
@@ -243,6 +259,24 @@ class ReleaseVerifyCISupervisorTests(unittest.TestCase):
                 "    log('go')\n"
                 "    if STAGE == 'capabilities':\n"
                 "        print(json.dumps({'phase':'done','status':'PASS'}),flush=True); sys.exit(0)\n"
+                "    children=[]\n"
+                "    def shutdown(_signal,_frame):\n"
+                "        for child in children:\n"
+                "            try: os.kill(child,signal.SIGTERM)\n"
+                "            except ProcessLookupError: pass\n"
+                "        for child in children:\n"
+                "            try: os.waitpid(child,0)\n"
+                "            except ChildProcessError: pass\n"
+                "        sys.exit(0)\n"
+                "    signal.signal(signal.SIGTERM,shutdown)\n"
+                "    for _ in range(3):\n"
+                "        child=os.fork()\n"
+                "        if child==0:\n"
+                "            resource.setrlimit(resource.RLIMIT_AS,(64*1024**2,64*1024**2))\n"
+                "            signal.signal(signal.SIGTERM,signal.SIG_DFL)\n"
+                "            time.sleep(90); os._exit(0)\n"
+                "        children.append(child)\n"
+                "    state['children']=children; save_state(state)\n"
                 "    for value in ({'phase':'pids','limit_enforced':True},"
                 "                  {'phase':'scratch','exhausted':True},"
                 "                  {'phase':'tree-ready'}):\n"
@@ -253,9 +287,12 @@ class ReleaseVerifyCISupervisorTests(unittest.TestCase):
                 "elif command[:2] == ['container','top']:\n"
                 "    open(TOP_STARTED,'wb').close(); log('top-start'); time.sleep(0.5)\n"
                 "    print('PID PPID')\n"
-                "    for _ in range(4): print(str(state.get('attach_pid',0))+' 0')\n"
+                "    print(str(state['attach_pid'])+' '+str(state['attach_parent']))\n"
+                "    for child in state.get('children',[]): print(str(child)+' '+str(state['attach_pid']))\n"
                 "elif command[:2] == ['container','stop']:\n"
                 "    state['running']=False; save_state(state); log('stop')\n"
+                "    try: os.kill(state['attach_pid'],signal.SIGTERM)\n"
+                "    except ProcessLookupError: pass\n"
                 "elif command[:2] == ['container','rm']:\n"
                 "    state.update(exists=False,running=False); save_state(state); log('rm')\n"
                 "else:\n"
@@ -685,6 +722,7 @@ class ReleaseVerifyCISupervisorTests(unittest.TestCase):
             api._ledger_write(root, ledger)
             control = {
                 "docker_path": "/synthetic/docker", "run_id": _RUN_ID,
+                "docker_root_path": str(self.fixture_root),
                 "name": _OWNED_NAME, "deadline_ns": time.monotonic_ns() - 1,
                 "controller_pid": 789, "controller_start_ticks": 123,
                 "owner_uid": os.getuid(),

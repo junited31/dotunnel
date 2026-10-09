@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import hashlib
+import fcntl
 import json
 import os
 import platform
@@ -17,6 +18,7 @@ import re
 import selectors
 import shutil
 import signal
+import secrets
 import stat
 import subprocess
 import sys
@@ -1025,7 +1027,8 @@ def _docker_command(
     )
 
 def _parse_json_output(result: _CommandResult) -> object | None:
-    if result.returncode != 0 or result.timed_out or result.stdout_truncated:
+    if (result.returncode != 0 or result.timed_out
+            or result.stdout_truncated or result.stderr_truncated):
         return None
     try:
         return json.loads(result.stdout.decode("utf-8"))
@@ -1367,15 +1370,184 @@ def _write_exclusive(path: Path, data: bytes, mode: int = 0o600) -> None:
         os.close(fd)
 
 
-def _write_atomic(path: Path, data: bytes, root: Path) -> None:
-    temp_path = root / ".ledger.tmp"
-    _write_exclusive(temp_path, data)
-    os.replace(temp_path, path)
-    directory_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try:
-        os.fsync(directory_fd)
-    finally:
+def _private_root_identity(root: Path) -> tuple[int, int, int, int]:
+    identity = _path_snapshot(root)
+    if identity[2:] != (_effective_uid(), 0o700):
+        raise ValueError("private run directory ownership or mode changed")
+    return identity
+
+
+def _private_metadata_identity(info: os.stat_result) -> tuple[int, int, int, int, int, int, int, int]:
+    mode = stat.S_IMODE(info.st_mode)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != _effective_uid()
+        or mode != 0o600
+        or info.st_nlink != 1
+    ):
+        raise ValueError("private metadata file ownership, mode, or identity is unsafe")
+    return (
+        info.st_dev, info.st_ino, info.st_uid, mode, info.st_nlink,
+        info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+    )
+
+
+def _private_metadata_at(directory_fd: int, name: str) -> tuple[int, int, int, int, int, int, int, int]:
+    if Path(name).name != name:
+        raise ValueError("private metadata filename is not a leaf")
+    return _private_metadata_identity(os.stat(name, dir_fd=directory_fd, follow_symlinks=False))
+
+
+def _private_metadata_snapshot(root: Path, name: str) -> tuple[int, int, int, int, int, int, int, int]:
+    if Path(name).name != name:
+        raise ValueError("private metadata filename is not a leaf")
+    return _private_metadata_identity(os.lstat(root / name))
+
+
+def _read_private_metadata(root: Path, name: str, *, max_bytes: int) -> bytes:
+    root_identity = _private_root_identity(root)
+    identity = _private_metadata_snapshot(root, name)
+    data = _read_file(root / name, max_bytes=max_bytes)
+    if (
+        _private_root_identity(root) != root_identity
+        or _private_metadata_snapshot(root, name) != identity
+    ):
+        raise ValueError("private metadata identity changed while reading")
+    return data
+
+
+def _open_private_root_dir(root: Path) -> tuple[int, tuple[int, int, int, int]]:
+    root_identity = _private_root_identity(root)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    directory_fd = os.open(root, flags)
+    info = os.fstat(directory_fd)
+    if (info.st_dev, info.st_ino, info.st_uid, stat.S_IMODE(info.st_mode)) != root_identity:
         os.close(directory_fd)
+        raise ValueError("private run directory identity changed while opening")
+    return directory_fd, root_identity
+
+
+def _assert_open_private_root(
+    root: Path, directory_fd: int, expected: tuple[int, int, int, int],
+) -> None:
+    info = os.fstat(directory_fd)
+    if (
+        (info.st_dev, info.st_ino, info.st_uid, stat.S_IMODE(info.st_mode)) != expected
+        or _private_root_identity(root) != expected
+    ):
+        raise ValueError("private run directory identity changed")
+
+
+def _open_private_lock(root: Path, name: str) -> int:
+    if name not in {".ledger.lock", ".go.lock"}:
+        raise ValueError("unknown private lock name")
+    directory_fd, root_identity = _open_private_root_dir(root)
+    lock_fd: int | None = None
+    flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        try:
+            lock_fd = os.open(
+                name, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory_fd,
+            )
+        except FileExistsError:
+            lock_fd = os.open(name, flags, dir_fd=directory_fd)
+        identity = _private_metadata_identity(os.fstat(lock_fd))
+        if identity[5] != 0 or _private_metadata_at(directory_fd, name) != identity:
+            raise ValueError("private lock file identity is unsafe")
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        _assert_open_private_root(root, directory_fd, root_identity)
+        if _private_metadata_at(directory_fd, name) != identity:
+            raise ValueError("private lock file was replaced")
+        os.close(directory_fd)
+        return lock_fd
+    except BaseException:
+        if lock_fd is not None:
+            os.close(lock_fd)
+        os.close(directory_fd)
+        raise
+
+
+def _release_private_lock(lock_fd: int) -> None:
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    finally:
+        os.close(lock_fd)
+
+
+def _write_atomic(path: Path, data: bytes, root: Path) -> None:
+    if path != root / "ledger.json" or not isinstance(data, bytes):
+        raise ValueError("atomic ledger target is not the private ledger")
+    lock_fd = _open_private_lock(root, ".ledger.lock")
+    directory_fd: int | None = None
+    temp_fd: int | None = None
+    temp_name: str | None = None
+    temp_dev_ino: tuple[int, int] | None = None
+    try:
+        directory_fd, root_identity = _open_private_root_dir(root)
+        target_before: tuple[int, int, int, int, int, int, int, int] | None
+        try:
+            target_before = _private_metadata_at(directory_fd, "ledger.json")
+        except FileNotFoundError:
+            target_before = None
+        temp_name = f".ledger.tmp.{os.getpid()}.{secrets.token_hex(16)}"
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        temp_fd = os.open(temp_name, flags, 0o600, dir_fd=directory_fd)
+        created = os.fstat(temp_fd)
+        _private_metadata_identity(created)
+        temp_dev_ino = (created.st_dev, created.st_ino)
+        view = memoryview(data)
+        while view:
+            written = os.write(temp_fd, view)
+            if written <= 0:
+                raise OSError("short private metadata write")
+            view = view[written:]
+        os.fsync(temp_fd)
+        temp_identity = _private_metadata_identity(os.fstat(temp_fd))
+        if _private_metadata_at(directory_fd, temp_name) != temp_identity:
+            raise ValueError("atomic ledger temporary identity changed")
+        _assert_open_private_root(root, directory_fd, root_identity)
+        try:
+            target_now = _private_metadata_at(directory_fd, "ledger.json")
+        except FileNotFoundError:
+            target_now = None
+        if target_now != target_before:
+            raise ValueError("ledger destination identity changed before atomic replace")
+        os.replace(
+            temp_name, "ledger.json",
+            src_dir_fd=directory_fd, dst_dir_fd=directory_fd,
+        )
+        temp_name = None
+        if _private_metadata_at(directory_fd, "ledger.json") != temp_identity:
+            raise ValueError("atomic ledger destination identity changed")
+        os.fsync(directory_fd)
+        _assert_open_private_root(root, directory_fd, root_identity)
+    except BaseException:
+        if directory_fd is not None and temp_name is not None and temp_dev_ino is not None:
+            try:
+                _assert_open_private_root(root, directory_fd, root_identity)
+                current = _private_metadata_at(directory_fd, temp_name)
+                if current[:2] == temp_dev_ino:
+                    os.unlink(temp_name, dir_fd=directory_fd)
+            except (OSError, ValueError):
+                pass
+        raise
+    finally:
+        if temp_fd is not None:
+            os.close(temp_fd)
+        if directory_fd is not None:
+            os.close(directory_fd)
+        _release_private_lock(lock_fd)
 
 
 def _source_identity() -> tuple[Path, str, int, int]:
@@ -1403,7 +1575,7 @@ def _python_identity() -> tuple[Path, int, int]:
 
 def _ledger_read(root: Path) -> dict[str, object] | None:
     try:
-        data = _read_file(root / "ledger.json", max_bytes=16 * 1024)
+        data = _read_private_metadata(root, "ledger.json", max_bytes=16 * 1024)
         value = _load_json(data)
     except (OSError, ValueError, json.JSONDecodeError, UnicodeDecodeError):
         return None
@@ -1418,8 +1590,7 @@ def _ledger_read(root: Path) -> dict[str, object] | None:
 
 
 def _ledger_write(root: Path, ledger: dict[str, object]) -> None:
-    if _path_snapshot(root)[:3] != (os.stat(root).st_dev, os.stat(root).st_ino, _effective_uid()):
-        raise ValueError("private run directory identity changed")
+    _private_root_identity(root)
     _write_atomic(root / "ledger.json", _canonical_bytes(ledger), root)
 
 
@@ -1496,71 +1667,107 @@ def _cleanup_container(
     container_id: str | None,
     *,
     home: Path | None = None,
+    resource_check: Callable[[], None] | None = None,
 ) -> tuple[bool, str, str | None]:
     """Stop/remove only a repeatedly inspected exact run-owned container."""
-    details = _inspect_expected(docker, run_id, name, container_id=container_id, home=home)
+    details = _inspect_expected(
+        docker, run_id, name, container_id=container_id, home=home,
+        resource_check=resource_check,
+    )
     resolved_id = _owned_by_run(details, run_id, name) if details is not None else None
     if details is None and container_id is None:
         # Reconcile an interrupted create through the exact deterministic name.
-        details = _inspect_expected(docker, run_id, name, home=home)
+        details = _inspect_expected(
+            docker, run_id, name, home=home, resource_check=resource_check,
+        )
         resolved_id = _owned_by_run(details, run_id, name) if details is not None else None
     if details is None:
         if container_id is not None:
-            by_name = _docker_inspect(docker, name, home=home)
+            by_name = _docker_inspect(
+                docker, name, home=home, resource_check=resource_check,
+            )
             if by_name is not None:
                 return False, "name-now-refers-to-an-unowned-container", container_id
-            absent_id = _docker_reference_absent(docker, container_id, home)
-            absent_name = _docker_reference_absent(docker, name, home)
-            return absent_id and absent_name, "already-absent" if absent_id and absent_name else "absence-unconfirmed", container_id
+            absent_id = _docker_reference_absent(
+                docker, container_id, home, resource_check=resource_check,
+            )
+            absent_name = _docker_reference_absent(
+                docker, name, home, resource_check=resource_check,
+            )
+            confirmed = absent_id and absent_name
+            return confirmed, "already-absent" if confirmed else "absence-unconfirmed", container_id
         return False, "create-outcome-unresolved", None
     if resolved_id is None:
         return False, "ownership-check-failed", container_id
     if _state_running(details):
         # Recheck identity immediately before every destructive Docker request.
-        current = _inspect_expected(docker, run_id, name, container_id=resolved_id, home=home)
+        current = _inspect_expected(
+            docker, run_id, name, container_id=resolved_id, home=home,
+            resource_check=resource_check,
+        )
         if current is None:
             return False, "ownership-changed-before-stop", resolved_id
         stopped = _docker_command(
             docker, ["container", "stop", "--time", str(CORE_LIMITS.stop_seconds), resolved_id],
-            timeout=CORE_LIMITS.stop_seconds + 3, home=home,
+            timeout=CORE_LIMITS.stop_seconds + 3, home=home, resource_check=resource_check,
         )
-        current = _inspect_expected(docker, run_id, name, container_id=resolved_id, home=home)
+        current = _inspect_expected(
+            docker, run_id, name, container_id=resolved_id, home=home,
+            resource_check=resource_check,
+        )
         if current is None:
             return False, "ownership-lost-after-stop", resolved_id
         if _state_running(current):
-            current = _inspect_expected(docker, run_id, name, container_id=resolved_id, home=home)
+            current = _inspect_expected(
+                docker, run_id, name, container_id=resolved_id, home=home,
+                resource_check=resource_check,
+            )
             if current is None:
                 return False, "ownership-changed-before-kill", resolved_id
-            killed = _docker_command(docker, ["container", "kill", "--signal", "KILL", resolved_id], timeout=5, home=home)
-            current = _inspect_expected(docker, run_id, name, container_id=resolved_id, home=home)
+            killed = _docker_command(
+                docker, ["container", "kill", "--signal", "KILL", resolved_id],
+                timeout=5, home=home, resource_check=resource_check,
+            )
+            current = _inspect_expected(
+                docker, run_id, name, container_id=resolved_id, home=home,
+                resource_check=resource_check,
+            )
             if current is None or _state_running(current) or killed.returncode != 0:
                 return False, "container-kill-unconfirmed", resolved_id
         elif stopped.returncode != 0 and _state_running(current):
             return False, "container-stop-unconfirmed", resolved_id
-    current = _inspect_expected(docker, run_id, name, container_id=resolved_id, home=home)
+    current = _inspect_expected(
+        docker, run_id, name, container_id=resolved_id, home=home,
+        resource_check=resource_check,
+    )
     if current is None:
         return False, "ownership-changed-before-remove", resolved_id
     if _state_running(current):
         return False, "container-still-running", resolved_id
-    removed = _docker_command(docker, ["container", "rm", resolved_id], timeout=8, home=home)
+    removed = _docker_command(
+        docker, ["container", "rm", resolved_id], timeout=8, home=home,
+        resource_check=resource_check,
+    )
     if removed.returncode != 0 or removed.timed_out:
         return False, "container-remove-failed", resolved_id
-    absent_id = _docker_reference_absent(docker, resolved_id, home)
-    by_name = _docker_inspect(docker, name, home=home)
+    absent_id = _docker_reference_absent(
+        docker, resolved_id, home, resource_check=resource_check,
+    )
+    by_name = _docker_inspect(docker, name, home=home, resource_check=resource_check)
     if by_name is not None:
         return False, "owned-name-reused-or-foreign-container-present", resolved_id
-    absent_name = _docker_reference_absent(docker, name, home)
+    absent_name = _docker_reference_absent(
+        docker, name, home, resource_check=resource_check,
+    )
     confirmed = absent_id and absent_name
     return confirmed, "removed" if confirmed else "removal-absence-unconfirmed", resolved_id
 
 
+
 def _control_read(root: Path, expected_digest: str) -> dict[str, object] | None:
     try:
-        _path_snapshot(root)
-        info = os.lstat(root / "control.json")
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != _effective_uid() or stat.S_IMODE(info.st_mode) != 0o600:
-            return None
-        data = _read_file(root / "control.json", max_bytes=16 * 1024)
+        root_identity = _private_root_identity(root)
+        data = _read_private_metadata(root, "control.json", max_bytes=16 * 1024)
         if hashlib.sha256(data).hexdigest() != expected_digest:
             return None
         control = _load_json(data)
@@ -1570,14 +1777,38 @@ def _control_read(root: Path, expected_digest: str) -> dict[str, object] | None:
         "schema", "run_id", "name", "root", "root_dev", "root_ino", "owner_uid",
         "source_path", "source_sha256", "source_dev", "source_ino",
         "python_path", "python_dev", "python_ino",
-        "docker_path", "controller_pid", "controller_start_ticks", "deadline_ns",
+        "docker_path", "docker_root_path", "controller_pid", "controller_start_ticks",
+        "deadline_ns",
     }
     if not isinstance(control, dict) or set(control) != keys or control.get("schema") != 1:
         return None
     if control.get("root") != str(root) or control.get("owner_uid") != _effective_uid():
         return None
-    root_info = os.stat(root, follow_symlinks=False)
-    if (control.get("root_dev"), control.get("root_ino")) != (root_info.st_dev, root_info.st_ino):
+    try:
+        docker_root_value = control.get("docker_root_path")
+        if not isinstance(docker_root_value, str):
+            return None
+        docker_root = Path(docker_root_value)
+        if (
+            not docker_root.is_absolute()
+            or ".." in docker_root.parts
+            or str(docker_root) != docker_root_value
+            or docker_root.resolve(strict=True) != docker_root
+            or not stat.S_ISDIR(os.stat(docker_root, follow_symlinks=False).st_mode)
+        ):
+            return None
+        root_info = os.stat(root, follow_symlinks=False)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    try:
+        current_root_identity = _private_root_identity(root)
+    except (OSError, ValueError):
+        return None
+    if (
+        current_root_identity != root_identity
+        or (control.get("root_dev"), control.get("root_ino"))
+        != (root_info.st_dev, root_info.st_ino)
+    ):
         return None
     return control
 
@@ -1600,29 +1831,169 @@ def _source_matches(control: dict[str, object]) -> bool:
         return False
 
 
-def _remove_private_root(root: Path, expected_dev: int, expected_ino: int) -> bool:
-    try:
-        root_info = os.lstat(root)
-        if not stat.S_ISDIR(root_info.st_mode) or stat.S_ISLNK(root_info.st_mode):
-            return False
-        if (root_info.st_dev, root_info.st_ino, root_info.st_uid) != (expected_dev, expected_ino, _effective_uid()):
-            return False
-        allowed = {"ledger.json", "control.json", ".ledger.tmp"}
-        for entry in os.scandir(root):
-            if entry.name not in allowed or entry.is_symlink() or not entry.is_file(follow_symlinks=False):
-                return False
-            info = entry.stat(follow_symlinks=False)
-            if info.st_uid != _effective_uid() or stat.S_IMODE(info.st_mode) != 0o600:
-                return False
-        for name in allowed:
-            try:
-                os.unlink(root / name)
-            except FileNotFoundError:
-                pass
-        os.rmdir(root)
-        return True
-    except OSError:
+def _write_private_marker(root: Path, name: str, contents: bytes) -> bool:
+    if name not in {"go.closed", "go.claimed"}:
         return False
+    try:
+        root_identity = _private_root_identity(root)
+        try:
+            _write_exclusive(root / name, contents)
+        except FileExistsError:
+            pass
+        if _read_private_metadata(root, name, max_bytes=32) != contents:
+            return False
+        directory_fd, opened_identity = _open_private_root_dir(root)
+        try:
+            if opened_identity != root_identity:
+                return False
+            os.fsync(directory_fd)
+            _assert_open_private_root(root, directory_fd, root_identity)
+        finally:
+            os.close(directory_fd)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _go_marker_present(root: Path, name: str) -> bool:
+    try:
+        _private_metadata_snapshot(root, name)
+        return True
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        return True
+
+def _go_ledger_ready(root: Path) -> bool:
+    ledger = _ledger_read(root)
+    if ledger is None:
+        return False
+    run_id = ledger.get("run_id")
+    container_id = ledger.get("container_id")
+    docker_pid = ledger.get("docker_pid")
+    start_ticks = ledger.get("docker_start_ticks")
+    return (
+        isinstance(run_id, str)
+        and _RUN_ID_RE.fullmatch(run_id) is not None
+        and ledger.get("name") == _CONTAINER_PREFIX + run_id
+        and ledger.get("state") == "started"
+        and ledger.get("attempted") is True
+        and ledger.get("cleanup_confirmed") is False
+        and isinstance(container_id, str)
+        and _CONTAINER_ID_RE.fullmatch(container_id) is not None
+        and type(docker_pid) is int
+        and docker_pid > 0
+        and type(start_ticks) is int
+        and start_ticks >= 0
+    )
+
+
+def _close_go_admission(root: Path) -> bool:
+    try:
+        lock_fd = _open_private_lock(root, ".go.lock")
+    except (OSError, ValueError):
+        return False
+    try:
+        return _write_private_marker(root, "go.closed", b"closed\n")
+    finally:
+        _release_private_lock(lock_fd)
+
+
+def _remove_private_root(root: Path, expected_dev: int, expected_ino: int) -> bool:
+    parent_fd: int | None = None
+    directory_fd: int | None = None
+    go_lock: int | None = None
+    ledger_lock: int | None = None
+    root_identity: tuple[int, int, int, int] | None = None
+    fence_removed = False
+    root_removed = False
+    keep_go_lock = False
+    try:
+        parent_fd, _parent_identity = _open_private_root_dir(root.parent)
+        root_identity = _private_root_identity(root)
+        parent_entry = os.stat(root.name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            (root_identity[0], root_identity[1]) != (expected_dev, expected_ino)
+            or (parent_entry.st_dev, parent_entry.st_ino, parent_entry.st_uid,
+                stat.S_IMODE(parent_entry.st_mode)) != root_identity
+        ):
+            return False
+        go_lock = _open_private_lock(root, ".go.lock")
+        if not _write_private_marker(root, "go.closed", b"closed\n"):
+            keep_go_lock = True
+            return False
+        ledger_lock = _open_private_lock(root, ".ledger.lock")
+        directory_fd, opened_identity = _open_private_root_dir(root)
+        if opened_identity != root_identity:
+            return False
+        allowed = {
+            "ledger.json", "control.json", ".ledger.lock", ".go.lock",
+            "go.closed", "go.claimed",
+        }
+        entries: list[tuple[str, tuple[int, int, int, int, int, int, int, int]]] = []
+        with os.scandir(directory_fd) as scan:
+            for entry in scan:
+                name = entry.name
+                if name not in allowed and re.fullmatch(
+                    r"\.ledger\.tmp\.[1-9][0-9]*\.[0-9a-f]{32}", name,
+                ) is None:
+                    return False
+                identity = _private_metadata_at(directory_fd, name)
+                if identity[5] > 16 * 1024:
+                    return False
+                if name in {".ledger.lock", ".go.lock"} and identity[5] != 0:
+                    return False
+                if name == "go.closed" and _read_private_metadata(
+                    root, name, max_bytes=32,
+                ) != b"closed\n":
+                    return False
+                if name == "go.claimed" and _read_private_metadata(
+                    root, name, max_bytes=32,
+                ) != b"claimed\n":
+                    return False
+                entries.append((name, identity))
+        entries.sort(key=lambda item: item[0] == "go.closed")
+        for name, identity in entries:
+            if _private_metadata_at(directory_fd, name) != identity:
+                return False
+            os.unlink(name, dir_fd=directory_fd)
+            if name == "go.closed":
+                fence_removed = True
+        _assert_open_private_root(root, directory_fd, root_identity)
+        os.fsync(directory_fd)
+        os.close(directory_fd)
+        directory_fd = None
+        parent_entry = os.stat(root.name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            (parent_entry.st_dev, parent_entry.st_ino, parent_entry.st_uid,
+             stat.S_IMODE(parent_entry.st_mode)) != root_identity
+        ):
+            return False
+        os.rmdir(root.name, dir_fd=parent_fd)
+        root_removed = True
+        os.fsync(parent_fd)
+        return True
+    except (OSError, ValueError):
+        return False
+    finally:
+        if fence_removed and not root_removed:
+            try:
+                if (
+                    root_identity is None
+                    or _private_root_identity(root) != root_identity
+                    or not _write_private_marker(root, "go.closed", b"closed\n")
+                ):
+                    keep_go_lock = True
+            except (OSError, ValueError):
+                keep_go_lock = True
+        if directory_fd is not None:
+            os.close(directory_fd)
+        if ledger_lock is not None:
+            _release_private_lock(ledger_lock)
+        if go_lock is not None and not keep_go_lock:
+            _release_private_lock(go_lock)
+        if parent_fd is not None:
+            os.close(parent_fd)
 
 
 def _private_root_absent(root: Path) -> bool:
@@ -1635,11 +2006,25 @@ def _private_root_absent(root: Path) -> bool:
     return False
 
 
+def _watchdog_client_quiesced(ledger: dict[str, object], owner_uid: int) -> bool:
+    pid = ledger.get("docker_pid")
+    start_ticks = ledger.get("docker_start_ticks")
+    if type(pid) is not int or pid <= 0 or type(start_ticks) is not int or start_ticks < 0:
+        return False
+    try:
+        killed = _kill_verified_process(pid, start_ticks, owner_uid)
+        still_matches = _current_process_matches(pid, start_ticks, owner_uid)
+    except (OSError, ValueError, RuntimeError):
+        return False
+    return killed and not still_matches
+
+
 def _watchdog(root: Path, expected_control_digest: str) -> int:
     control = _control_read(root, expected_control_digest)
     if control is None or not _source_matches(control):
         return 70
     docker = str(control["docker_path"])
+    docker_root = Path(str(control["docker_root_path"]))
     if not _secure_executable(docker):
         return 71
     if sys.stdout is None:
@@ -1652,11 +2037,39 @@ def _watchdog(root: Path, expected_control_digest: str) -> int:
     controller_pid = int(control["controller_pid"])
     controller_ticks = int(control["controller_start_ticks"])
     owner_uid = int(control["owner_uid"])
+    telemetry_failure_latched: str | None = None
     while True:
         ledger = _ledger_read(root)
         if ledger is None or ledger.get("run_id") != run_id or ledger.get("name") != name:
             return 72
         if ledger.get("state") == "complete" and ledger.get("cleanup_confirmed") is True:
+            try:
+                admission_lock = _open_private_lock(root, ".go.lock")
+            except (OSError, ValueError):
+                return 75
+            if not _write_private_marker(root, "go.closed", b"closed\n"):
+                # Keep the shared lock held until process exit; no controller
+                # can mistake a failed fence for permission to send GO.
+                return 75
+            if ledger.get("attempted") is True and not _watchdog_client_quiesced(
+                ledger, owner_uid,
+            ):
+                previous_reason = ledger.get("cleanup_reason")
+                ledger["state"] = "watchdog-unresolved"
+                ledger["cleanup_confirmed"] = False
+                ledger["cleanup_reason"] = (
+                    previous_reason + ";docker-client-quiescence-unconfirmed"
+                    if isinstance(previous_reason, str) and previous_reason
+                    else "docker-client-quiescence-unconfirmed"
+                )
+                ledger["status"] = "BLOCKED"
+                try:
+                    _ledger_write(root, ledger)
+                except (OSError, ValueError):
+                    return 73
+                _release_private_lock(admission_lock)
+                return 74
+            _release_private_lock(admission_lock)
             removed = _remove_private_root(
                 root, int(control["root_dev"]), int(control["root_ino"])
             )
@@ -1664,21 +2077,44 @@ def _watchdog(root: Path, expected_control_digest: str) -> int:
         now_ns = time.monotonic_ns()
         controller_alive = _current_process_matches(controller_pid, controller_ticks, owner_uid)
         if not controller_alive or now_ns >= deadline_ns:
+            try:
+                admission_lock = _open_private_lock(root, ".go.lock")
+            except (OSError, ValueError):
+                return 76
+            fence_confirmed = _write_private_marker(root, "go.closed", b"closed\n")
+            if fence_confirmed:
+                _release_private_lock(admission_lock)
             container_id = ledger.get("container_id")
             if not isinstance(container_id, str) or _CONTAINER_ID_RE.fullmatch(container_id) is None:
                 container_id = None
             if ledger.get("attempted") is not True:
                 confirmed, reason, actual_id = True, "no-create-request-issued", None
+                client_quiesced = True
+                intermediate_write_failed = False
+                telemetry_failure = telemetry_failure_latched
             else:
                 home = Path(pwd.getpwuid(owner_uid).pw_dir)
-                docker_pid = ledger.get("docker_pid")
-                docker_ticks = ledger.get("docker_start_ticks")
-                client_identity_known = type(docker_pid) is int and type(docker_ticks) is int
-                client_quiesced = False
-                if client_identity_known:
-                    client_quiesced = _kill_verified_process(docker_pid, docker_ticks, owner_uid)
+                telemetry_failure = telemetry_failure_latched
+
+                def resource_check() -> None:
+                    nonlocal telemetry_failure, telemetry_failure_latched
+                    try:
+                        failure = _host_resource_reason(
+                            _host_resources(home, docker_root),
+                        )
+                    except Exception:
+                        failure = "host-resource-telemetry-unavailable"
+                    if failure is not None and telemetry_failure_latched is None:
+                        telemetry_failure_latched = failure
+                    if telemetry_failure is None:
+                        telemetry_failure = telemetry_failure_latched
+
+                client_quiesced = _watchdog_client_quiesced(ledger, owner_uid)
+                intermediate_write_failed = False
                 if container_id is None:
-                    discovered = _inspect_expected(docker, run_id, name, home=home)
+                    discovered = _inspect_expected(
+                        docker, run_id, name, home=home, resource_check=resource_check,
+                    )
                     if discovered is not None:
                         container_id = _owned_by_run(discovered, run_id, name)
                         if container_id is not None:
@@ -1687,7 +2123,7 @@ def _watchdog(root: Path, expected_control_digest: str) -> int:
                             try:
                                 _ledger_write(root, ledger)
                             except (OSError, ValueError):
-                                return 73
+                                intermediate_write_failed = True
                 if container_id is None:
                     # Killing a client does not cancel an in-flight daemon
                     # create. NotFound cannot prove noncreation without its
@@ -1697,8 +2133,22 @@ def _watchdog(root: Path, expected_control_digest: str) -> int:
                     actual_id = None
                 else:
                     confirmed, reason, actual_id = _cleanup_container(
-                        docker, run_id, name, container_id, home=home
+                        docker, run_id, name, container_id, home=home,
+                        resource_check=resource_check,
                     )
+                resource_check()
+            failures: list[str] = []
+            if not client_quiesced:
+                failures.append("docker-client-quiescence-unconfirmed")
+            if telemetry_failure is not None:
+                failures.append(telemetry_failure)
+            if not fence_confirmed:
+                failures.append("go-admission-fence-unconfirmed")
+            if intermediate_write_failed:
+                failures.append("cid-reconciliation-ledger-write-failed")
+            if failures:
+                reason = ";".join((*failures, reason))
+            confirmed = confirmed and client_quiesced and telemetry_failure is None and fence_confirmed
             ledger["state"] = "watchdog-cleaned" if confirmed else "watchdog-unresolved"
             ledger["container_id"] = actual_id
             ledger["cleanup_confirmed"] = confirmed
@@ -1708,6 +2158,9 @@ def _watchdog(root: Path, expected_control_digest: str) -> int:
                 _ledger_write(root, ledger)
             except (OSError, ValueError):
                 return 73
+            if not fence_confirmed:
+                # The lock remains held through this process's exit.
+                return 74
             if not controller_alive and confirmed:
                 root_info = os.stat(root, follow_symlinks=False)
                 removed = _remove_private_root(root, root_info.st_dev, root_info.st_ino)
@@ -1737,7 +2190,8 @@ def _watchdog_start(
 
 
 def _wait_watchdog_ready(
-    process: subprocess.Popen[bytes], deadline_ns: int
+    process: subprocess.Popen[bytes], deadline_ns: int,
+    *, resource_check: Callable[[], None] | None = None,
 ) -> None:
     stream = process.stdout
     if stream is None:
@@ -1749,7 +2203,12 @@ def _wait_watchdog_ready(
     deadline = min(time.monotonic() + 5, deadline_ns / 1_000_000_000)
     try:
         while time.monotonic() < deadline and process.poll() is None:
-            events = selector.select(min(0.1, max(0.0, deadline - time.monotonic())))
+            if resource_check is not None:
+                resource_check()
+            wait_for = min(0.1, max(0.0, deadline - time.monotonic()))
+            events = selector.select(wait_for)
+            if resource_check is not None:
+                resource_check()
             for key, _mask in events:
                 chunk = os.read(key.fileobj.fileno(), 32 - len(received))
                 if not chunk:
@@ -1766,8 +2225,20 @@ def _wait_watchdog_ready(
         stream.close()
 
 
-def _image_preflight(docker: str, image: str, home: Path) -> tuple[bool, str, dict[str, object] | None]:
-    result = _docker_command(docker, ["image", "inspect", image], timeout=8, home=home, stdout_limit=32 * 1024)
+
+
+def _image_preflight(
+    docker: str, image: str, home: Path, *,
+    resource_check: Callable[[], None] | None = None,
+) -> tuple[bool, str, dict[str, object] | None]:
+    if resource_check is not None:
+        resource_check()
+    result = _docker_command(
+        docker, ["image", "inspect", image], timeout=8, home=home,
+        stdout_limit=32 * 1024, resource_check=resource_check,
+    )
+    if resource_check is not None:
+        resource_check()
     parsed = _parse_json_output(result)
     if not isinstance(parsed, list) or len(parsed) != 1 or not isinstance(parsed[0], dict):
         return False, "pinned-image-not-present-or-uninspectable", None
@@ -2003,6 +2474,57 @@ class _AttachedSession:
                     pass
 
 
+def _admit_and_send_go(
+    root: Path,
+    session: _AttachedSession,
+    watchdog: subprocess.Popen[bytes],
+    deadline_ns: int,
+    *,
+    final_proof: Callable[[], None] | None = None,
+) -> str | None:
+    try:
+        admission_lock = _open_private_lock(root, ".go.lock")
+    except (OSError, ValueError):
+        return "go-admission-fence-unavailable"
+    try:
+        if _go_marker_present(root, "go.closed"):
+            return "watchdog-teardown-in-progress"
+        if _go_marker_present(root, "go.claimed"):
+            return "go-already-claimed"
+        if watchdog.poll() is not None:
+            return "independent-watchdog-exited-before-go"
+        if not _go_ledger_ready(root):
+            return "go-ledger-not-ready"
+        if time.monotonic_ns() >= deadline_ns:
+            return "go-admission-deadline-exceeded"
+        if final_proof is not None:
+            final_proof()
+        if _go_marker_present(root, "go.closed"):
+            return "watchdog-teardown-in-progress"
+        if _go_marker_present(root, "go.claimed"):
+            return "go-already-claimed"
+        if watchdog.poll() is not None:
+            return "independent-watchdog-exited-before-go"
+        if not _go_ledger_ready(root):
+            return "go-ledger-not-ready"
+        if time.monotonic_ns() >= deadline_ns:
+            return "go-admission-deadline-exceeded"
+        if not _write_private_marker(root, "go.claimed", b"claimed\n"):
+            return "go-admission-fence-unavailable"
+        if time.monotonic_ns() >= deadline_ns:
+            return "go-admission-deadline-exceeded"
+        if watchdog.poll() is not None:
+            return "independent-watchdog-exited-before-go"
+        if _go_marker_present(root, "go.closed"):
+            return "watchdog-teardown-in-progress"
+        if time.monotonic_ns() >= deadline_ns:
+            return "go-admission-deadline-exceeded"
+        session.send_go()
+        return None
+    finally:
+        _release_private_lock(admission_lock)
+
+
 def _wait_event(
     session: _AttachedSession, phase: str, deadline: float, *,
     resource_check: Callable[[], None],
@@ -2023,11 +2545,20 @@ def _wait_event(
     return None
 
 
-def _process_identity(pid: int) -> tuple[int, int] | None:
-    start_ticks = _current_start_ticks(pid)
-    if start_ticks is None:
+def _process_identity(pid: int) -> tuple[int, int, int] | None:
+    try:
+        with open(f"/proc/{pid}/stat", "r", encoding="ascii") as stream:
+            record = stream.read(4096)
+        close = record.rfind(")")
+        if close < 0:
+            return None
+        fields = record[close + 2:].split()
+        start_ticks, parent_pid = int(fields[19]), int(fields[1])
+        if pid <= 1 or start_ticks <= 0 or parent_pid < 0 or fields[0] in {"Z", "X"}:
+            return None
+        return pid, start_ticks, parent_pid
+    except (OSError, ValueError, IndexError, UnicodeError):
         return None
-    return pid, start_ticks
 
 
 def _docker_top(
@@ -2036,27 +2567,53 @@ def _docker_top(
     home: Path,
     *,
     resource_check: Callable[[], None] | None = None,
-) -> list[tuple[int, int]] | None:
+) -> list[tuple[int, int, int]] | None:
     result = _docker_command(
         docker, ["container", "top", container_id, "-eo", "pid,ppid"],
         timeout=5, home=home, stdout_limit=16 * 1024,
         resource_check=resource_check,
     )
-    if result.returncode != 0 or result.timed_out or result.stdout_truncated:
+    if (result.returncode != 0 or result.timed_out
+            or result.stdout_truncated or result.stderr_truncated):
         return None
-    identities: list[tuple[int, int]] = []
-    for line in result.stdout.decode("ascii", "replace").splitlines():
+    try:
+        lines = result.stdout.decode("ascii").splitlines()
+    except UnicodeError:
+        return None
+    if not lines or lines[0].split() != ["PID", "PPID"]:
+        return None
+    identities: list[tuple[int, int, int]] = []
+    parents: dict[int, int] = {}
+    for line in lines[1:]:
         fields = line.split()
-        if len(fields) < 2 or not fields[0].isdigit() or not fields[1].isdigit():
-            continue
-        identity = _process_identity(int(fields[0]))
-        if identity is not None:
-            identities.append(identity)
+        if len(fields) != 2 or not all(field.isdigit() for field in fields):
+            return None
+        pid, parent_pid = map(int, fields)
+        if pid in parents or len(parents) >= CORE_LIMITS.process_limit:
+            return None
+        identity = _process_identity(pid)
+        if identity is None or identity[2] != parent_pid:
+            return None
+        parents[pid] = parent_pid
+        identities.append(identity)
+    roots = [pid for pid, parent_pid in parents.items() if parent_pid not in parents]
+    if len(roots) != 1:
+        return None
+    for pid in parents:
+        seen: set[int] = set()
+        while pid in parents:
+            if pid in seen:
+                return None
+            seen.add(pid)
+            parent_pid = parents[pid]
+            if parent_pid not in parents and pid != roots[0]:
+                return None
+            pid = parent_pid
     return identities
 
 
-def _processes_gone(identities: list[tuple[int, int]]) -> bool:
-    return all(_current_start_ticks(pid) != start for pid, start in identities)
+def _processes_gone(identities: list[tuple[int, int, int]]) -> bool:
+    return all(_current_start_ticks(pid) != start for pid, start, _parent in identities)
 
 
 def _run_pilot(spec: _Spec, policy: Policy) -> dict[str, object]:
@@ -2069,8 +2626,132 @@ def _run_pilot(spec: _Spec, policy: Policy) -> dict[str, object]:
     run_root_created = False
     watchdog: subprocess.Popen[bytes] | None = None
     ledger: dict[str, object] | None = None
+    home: Path | None = None
+    host_probe: dict[str, object] = {}
+    docker_root_path: Path | None = None
+    initial_resources: dict[str, int | None] = {}
+    final_resources: dict[str, int | None] = {}
+    min_memory: int | None = None
+    min_disk: int | None = None
+    min_docker_disk: int | None = None
+    resource_failure: str | None = None
+    cleanup_resource_failure: str | None = None
+    image_metadata: dict[str, object] | None = None
+    status = "BLOCKED"
+    reason = "trusted-preflight-failed"
+    cleanup_failures: list[str] = []
+    cleanup_confirmed = False
+    watchdog_exit: int | None = None
+
+    def sample_resources(
+        *, initial: bool = False, allow_missing_docker_root: bool = False,
+    ) -> str | None:
+        nonlocal final_resources, min_memory, min_disk, min_docker_disk, resource_failure
+        if home is None:
+            return resource_failure
+        try:
+            current = _host_resources(home, docker_root_path)
+        except Exception:
+            current = {
+                "memory_available_bytes": None,
+                "disk_free_bytes": None,
+                "docker_root_disk_free_bytes": None,
+            }
+        final_resources = current
+        for key, previous in (
+            ("memory_available_bytes", min_memory),
+            ("disk_free_bytes", min_disk),
+            ("docker_root_disk_free_bytes", min_docker_disk),
+        ):
+            value = current.get(key)
+            if type(value) is int and (previous is None or value < previous):
+                if key == "memory_available_bytes":
+                    min_memory = value
+                elif key == "disk_free_bytes":
+                    min_disk = value
+                else:
+                    min_docker_disk = value
+        if allow_missing_docker_root and docker_root_path is None:
+            memory = current.get("memory_available_bytes")
+            disk = current.get("disk_free_bytes")
+            if type(memory) is not int or type(disk) is not int or min(memory, disk) < 0:
+                failure = "host-resource-telemetry-unavailable"
+            elif memory < _HOST_START_MEMORY_BYTES or disk < _HOST_START_DISK_BYTES:
+                failure = "host-resource-headroom-insufficient"
+            else:
+                failure = None
+        else:
+            failure = _host_resource_reason(current, initial=initial)
+        if docker_root_path is None and not allow_missing_docker_root:
+            failure = failure or "host-resource-telemetry-unavailable"
+        if failure is not None and resource_failure is None:
+            resource_failure = failure
+        return resource_failure
+
+    def check_resources() -> None:
+        nonlocal reason, status
+        failure = sample_resources()
+        if failure is not None:
+            if status == "PASS" or reason in {"trusted-preflight-failed", "pilot-not-completed"}:
+                reason = failure
+            status = "FAIL" if ledger is not None and ledger.get("attempted") is True else "BLOCKED"
+            raise RuntimeError("host resource accounting or headroom is unavailable")
+
+    def cleanup_resources() -> None:
+        nonlocal reason, status, resource_failure, cleanup_resource_failure
+        try:
+            failure = sample_resources()
+        except Exception:
+            if resource_failure is None:
+                resource_failure = "host-resource-telemetry-unavailable"
+            failure = resource_failure
+        if failure is not None:
+            if cleanup_resource_failure is None:
+                cleanup_resource_failure = failure
+            if status == "PASS":
+                status = "FAIL"
+                reason = failure
+
+    def wait_with_sampling(
+        process: subprocess.Popen[bytes], timeout: float, process_name: str,
+    ) -> int:
+        deadline = time.monotonic() + timeout
+        while True:
+            cleanup_resources()
+            returncode = process.poll()
+            if returncode is not None:
+                return returncode
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(process_name, timeout)
+            try:
+                return process.wait(timeout=min(0.1, remaining))
+            except subprocess.TimeoutExpired:
+                cleanup_resources()
+
+    def host_telemetry() -> dict[str, object]:
+        return {
+            "before": initial_resources,
+            "minimum_memory_available_bytes": min_memory,
+            "minimum_disk_free_bytes": min_disk,
+            "minimum_docker_root_disk_free_bytes": min_docker_disk,
+            "after": final_resources,
+        }
+
     try:
         home = _private_home()
+        resource_reason = sample_resources(
+            initial=True, allow_missing_docker_root=True,
+        )
+        if resource_reason is not None:
+            initial_resources = final_resources.copy()
+            reason = resource_reason
+            return {
+                "schema": 1, "status": "BLOCKED", "reason": resource_reason,
+                "original_cause": resource_reason, "cleanup_failures": [],
+                "probe": host_probe, "cleanup_confirmed": True,
+                "host_telemetry": host_telemetry(),
+            }
         image, input_proof = _validate_policy(policy)
         docker, docker_reason = _docker_binary()
         if docker is None:
@@ -2083,26 +2764,33 @@ def _run_pilot(spec: _Spec, policy: Policy) -> dict[str, object]:
             if isinstance(host_probe.get("docker"), dict)
             else None
         )
-        docker_root_path = (
-            Path(docker_root_value)
-            if isinstance(docker_root_value, str) and Path(docker_root_value).is_absolute()
-            else None
-        )
-        initial_resources = _host_resources(home, docker_root_path)
-        min_memory = initial_resources.get("memory_available_bytes")
-        min_disk = initial_resources.get("disk_free_bytes")
-        min_docker_disk = initial_resources.get("docker_root_disk_free_bytes")
-        final_resources: dict[str, int | None] = initial_resources.copy()
-        resource_reason = _host_resource_reason(initial_resources, initial=True)
+        if isinstance(docker_root_value, str) and Path(docker_root_value).is_absolute():
+            try:
+                resolved_docker_root = Path(docker_root_value).resolve(strict=True)
+                if resolved_docker_root.is_dir():
+                    docker_root_path = resolved_docker_root
+            except (OSError, RuntimeError):
+                pass
+        resource_reason = sample_resources(initial=True)
+        initial_resources = final_resources.copy()
         if resource_reason is not None:
+            reason = resource_reason
             return {
                 "schema": 1, "status": "BLOCKED", "reason": resource_reason,
+                "original_cause": resource_reason, "cleanup_failures": [],
                 "probe": host_probe, "cleanup_confirmed": True,
-                "host_telemetry": {"before": initial_resources},
+                "host_telemetry": host_telemetry(),
             }
-        image_ok, image_reason, image_metadata = _image_preflight(docker, image, home)
+        image_ok, image_reason, image_metadata = _image_preflight(
+            docker, image, home, resource_check=check_resources,
+        )
         if not image_ok:
-            return {"schema": 1, "status": "BLOCKED", "reason": image_reason, "probe": host_probe, "cleanup_confirmed": True}
+            return {
+                "schema": 1, "status": "BLOCKED", "reason": image_reason,
+                "original_cause": image_reason, "cleanup_failures": [],
+                "probe": host_probe, "cleanup_confirmed": True,
+                "host_telemetry": host_telemetry(),
+            }
         source, source_sha, _source_dev, _source_ino = _source_identity()
         python, python_dev, python_ino = _python_identity()
         if _effective_uid() != uid:
@@ -2137,6 +2825,7 @@ def _run_pilot(spec: _Spec, policy: Policy) -> dict[str, object]:
             "python_dev": python_dev,
             "python_ino": python_ino,
             "docker_path": docker,
+            "docker_root_path": str(docker_root_path),
             "controller_pid": os.getpid(),
             "controller_start_ticks": start_ticks,
             "deadline_ns": deadline_ns,
@@ -2159,14 +2848,13 @@ def _run_pilot(spec: _Spec, policy: Policy) -> dict[str, object]:
             "source_sha256": source_sha,
         }
         _write_exclusive(root / "ledger.json", _canonical_bytes(ledger))
-        watchdog = _watchdog_start(root, control_digest, python, source, home)
-        _wait_watchdog_ready(watchdog, deadline_ns)
-        status = "BLOCKED"
         reason = "pilot-not-completed"
+        watchdog = _watchdog_start(root, control_digest, python, source, home)
+        _wait_watchdog_ready(watchdog, deadline_ns, resource_check=check_resources)
         cid: str | None = None
         cleanup_confirmed = False
         output_cap_proven = False
-        process_tree_identities: list[tuple[int, int]] = []
+        process_tree_identities: list[tuple[int, int, int]] = []
         session: _AttachedSession | None = None
         captured: dict[str, object] = {
             "stdout_bytes": 0,
@@ -2178,31 +2866,7 @@ def _run_pilot(spec: _Spec, policy: Policy) -> dict[str, object]:
         }
         effects: dict[str, object] = {}
 
-        def sample_resources() -> str | None:
-            nonlocal min_memory, min_disk, min_docker_disk, final_resources
-            final_resources = _host_resources(home, docker_root_path)
-            for key, previous in (
-                ("memory_available_bytes", min_memory),
-                ("disk_free_bytes", min_disk),
-                ("docker_root_disk_free_bytes", min_docker_disk),
-            ):
-                value = final_resources.get(key)
-                if type(value) is int and (previous is None or value < previous):
-                    if key == "memory_available_bytes":
-                        min_memory = value
-                    elif key == "disk_free_bytes":
-                        min_disk = value
-                    else:
-                        min_docker_disk = value
-            return _host_resource_reason(final_resources)
 
-        def check_resources() -> None:
-            nonlocal reason, status
-            failure = sample_resources()
-            if failure is not None:
-                reason = failure
-                status = "FAIL" if ledger["attempted"] else "BLOCKED"
-                raise RuntimeError("host resource accounting or headroom is unavailable")
 
         def input_proof_matches() -> bool:
             if input_proof is None:
@@ -2340,9 +3004,16 @@ def _run_pilot(spec: _Spec, policy: Policy) -> dict[str, object]:
             if not current_limits_ok:
                 reason = "docker-limits-changed-before-effects:" + ",".join(current_limit_reasons)
                 raise RuntimeError("effective Docker controls changed before hostile effects")
-            check_resources()
-            check_input_proof("before-go")
-            session.send_go()
+            def final_go_proof() -> None:
+                check_resources()
+                check_input_proof("before-go")
+
+            go_failure = _admit_and_send_go(
+                root, session, watchdog, deadline_ns, final_proof=final_go_proof,
+            )
+            if go_failure is not None:
+                reason = go_failure
+                raise RuntimeError("final GO admission was refused")
             if spec.stage == "capabilities":
                 done = _wait_event(session, "done", deadline, resource_check=check_resources)
                 if done is None or done.get("status") != "PASS":
@@ -2440,11 +3111,11 @@ def _run_pilot(spec: _Spec, policy: Policy) -> dict[str, object]:
                     # only the local Docker attach process group if it will not exit.
                     _kill_process_group(session.process)
                 try:
-                    session.process.wait(timeout=2)
+                    wait_with_sampling(session.process, 2, "docker-attach")
                 except subprocess.TimeoutExpired:
                     _kill_process_group(session.process)
                     try:
-                        session.process.wait(timeout=1)
+                        wait_with_sampling(session.process, 1, "docker-attach")
                     except subprocess.TimeoutExpired:
                         status = "BLOCKED"
                         reason = "docker-attach-process-cleanup-unconfirmed"
@@ -2460,7 +3131,10 @@ def _run_pilot(spec: _Spec, policy: Policy) -> dict[str, object]:
                 })
             if ledger.get("attempted") is True:
                 if cid is None:
-                    discovered = _inspect_expected(docker, spec.run_id, name, home=home)
+                    discovered = _inspect_expected(
+                        docker, spec.run_id, name, home=home,
+                        resource_check=cleanup_resources,
+                    )
                     if discovered is not None:
                         cid = _owned_by_run(discovered, spec.run_id, name)
                         if cid is not None:
@@ -2477,7 +3151,8 @@ def _run_pilot(spec: _Spec, policy: Policy) -> dict[str, object]:
                     resolved_id = None
                 else:
                     confirmed, cleanup_reason, resolved_id = _cleanup_container(
-                        docker, spec.run_id, name, cid, home=home
+                        docker, spec.run_id, name, cid, home=home,
+                        resource_check=cleanup_resources,
                     )
             else:
                 confirmed, cleanup_reason, resolved_id = True, "no-create-request-issued", None
@@ -2504,7 +3179,7 @@ def _run_pilot(spec: _Spec, policy: Policy) -> dict[str, object]:
                 cleanup_failures.append(reason)
             watchdog_exit: int | None = None
             try:
-                watchdog_exit = watchdog.wait(timeout=5)
+                watchdog_exit = wait_with_sampling(watchdog, 5, "independent watchdog")
             except subprocess.TimeoutExpired:
                 status = "FAIL"
                 reason = "independent-watchdog-exit-unconfirmed"
@@ -2517,6 +3192,8 @@ def _run_pilot(spec: _Spec, policy: Policy) -> dict[str, object]:
                 status = "FAIL"
                 reason = "owned-container-cleanup-unconfirmed"
                 cleanup_failures.append(reason)
+                if cleanup_reason not in cleanup_failures:
+                    cleanup_failures.append(cleanup_reason)
             if not _processes_gone(process_tree_identities):
                 status = "FAIL"
                 reason = "host-process-descendant-survived-container-removal"
@@ -2538,11 +3215,17 @@ def _run_pilot(spec: _Spec, policy: Policy) -> dict[str, object]:
                 except (OSError, ValueError):
                     reason = "owned-ledger-finalization-failed"
                     cleanup_failures.append(reason)
-            final_resource_reason = sample_resources()
-            if final_resource_reason is not None and status == "PASS":
-                status = "FAIL"
-                reason = final_resource_reason
-                original_cause = final_resource_reason
+            sample_resources()
+            if cleanup_resource_failure is not None and cleanup_resource_failure not in cleanup_failures:
+                cleanup_failures.append(cleanup_resource_failure)
+            if resource_failure is not None:
+                if status == "PASS":
+                    status = "FAIL"
+                    reason = resource_failure
+                if original_cause is None:
+                    original_cause = resource_failure
+            if original_cause is None and status != "PASS":
+                original_cause = cleanup_resource_failure or reason
             captured["host_stdout_bytes_limit"] = CORE_LIMITS.stdout_bytes
             captured["host_stderr_bytes_limit"] = CORE_LIMITS.stderr_bytes
             captured["host_output_bytes_stored"] = (
@@ -2562,25 +3245,22 @@ def _run_pilot(spec: _Spec, policy: Policy) -> dict[str, object]:
             "process_accounting_evidence": effects.get("hostile", {}).get("pids") if isinstance(effects.get("hostile"), dict) else None,
             "tmpfs_quota_evidence": effects.get("hostile", {}).get("scratch") if isinstance(effects.get("hostile"), dict) else None,
             "output": captured,
-            "host_telemetry": {
-                "before": initial_resources,
-                "minimum_memory_available_bytes": min_memory,
-                "minimum_disk_free_bytes": min_disk,
-                "minimum_docker_root_disk_free_bytes": min_docker_disk,
-                "after": final_resources,
-            },
+            "host_telemetry": host_telemetry(),
             "cleanup_confirmed": cleanup_confirmed and root_removed and watchdog_exit == 0,
             "container_id_recorded_before_start": cid is not None,
             "process_tree_killed": bool(process_tree_identities) and _processes_gone(process_tree_identities),
             "watchdog_exit": watchdog_exit,
         }
     except (OSError, ValueError, KeyError, RuntimeError) as exc:
+        cleanup_failures = []
         cleanup_confirmed = not run_root_created
         if run_root_created and root is not None and root_info is not None:
             if watchdog is None:
                 cleanup_confirmed = _remove_private_root(
                     root, root_info.st_dev, root_info.st_ino
                 )
+                if not cleanup_confirmed:
+                    cleanup_failures.append("private-run-root-cleanup-unconfirmed")
             elif ledger is not None and ledger.get("attempted") is not True:
                 try:
                     ledger.update({
@@ -2590,23 +3270,43 @@ def _run_pilot(spec: _Spec, policy: Policy) -> dict[str, object]:
                         "status": "BLOCKED",
                     })
                     _ledger_write(root, ledger)
-                    watchdog_exit = watchdog.wait(timeout=5)
-                    cleanup_confirmed = (
-                        watchdog_exit is not None
-                        and (
-                            _remove_private_root(root, root_info.st_dev, root_info.st_ino)
-                            or _private_root_absent(root)
-                        )
+                    watchdog_exit = wait_with_sampling(
+                        watchdog, 5, "independent watchdog",
                     )
+                    if watchdog_exit != 0:
+                        cleanup_failures.append("independent-watchdog-failed")
+                    root_removed = (
+                        _remove_private_root(root, root_info.st_dev, root_info.st_ino)
+                        or _private_root_absent(root)
+                    )
+                    if not root_removed:
+                        cleanup_failures.append("private-run-root-cleanup-unconfirmed")
+                    cleanup_confirmed = watchdog_exit == 0 and root_removed
                 except (OSError, ValueError, subprocess.TimeoutExpired):
                     cleanup_confirmed = False
+                    cleanup_failures.append("independent-watchdog-exit-unconfirmed")
             else:
                 cleanup_confirmed = False
+                cleanup_failures.append("preflight-cleanup-unconfirmed")
+        cleanup_resources()
+        if cleanup_resource_failure is not None and cleanup_resource_failure not in cleanup_failures:
+            cleanup_failures.append(cleanup_resource_failure)
+        failure_reason = (
+            reason if reason != "trusted-preflight-failed"
+            else "trusted-preflight-failed:" + type(exc).__name__
+        )
         return {
             "schema": 1,
-            "status": "BLOCKED" if cleanup_confirmed else "FAIL",
-            "reason": "trusted-preflight-failed:" + type(exc).__name__,
+            "status": (
+                "BLOCKED" if cleanup_confirmed and not cleanup_failures else "FAIL"
+            ),
+            "reason": failure_reason,
+            "original_cause": failure_reason,
+            "cleanup_failures": cleanup_failures,
+            "probe": host_probe,
+            "host_telemetry": host_telemetry(),
             "cleanup_confirmed": cleanup_confirmed,
+            "watchdog_exit": watchdog_exit,
         }
 
 
