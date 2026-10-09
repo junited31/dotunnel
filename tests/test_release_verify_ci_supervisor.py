@@ -1,4 +1,5 @@
 import importlib
+import importlib.util
 import io
 import os
 import json
@@ -22,7 +23,32 @@ class ReleaseVerifyCISupervisorTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        cls.supervisor = importlib.import_module(_MODULE_NAME)
+        original = importlib.import_module(_MODULE_NAME)
+        fixture = tempfile.TemporaryDirectory(prefix="dotunnel-supervisor-tests-", dir="/tmp")
+        cls.addClassCleanup(fixture.cleanup)
+        cls.fixture_root = Path(fixture.name)
+        source = cls.fixture_root / "ci_supervisor.py"
+        source.write_bytes(Path(original.__file__).read_bytes())
+        source.chmod(0o600)
+        name = "_dotunnel_supervisor_test_fixture"
+        spec = importlib.util.spec_from_file_location(name, source)
+        if spec is None or spec.loader is None:
+            raise RuntimeError("supervisor fixture loader is unavailable")
+        cls.supervisor = importlib.util.module_from_spec(spec)
+        sys.modules[name] = cls.supervisor
+        cls.addClassCleanup(sys.modules.pop, name, None)
+        spec.loader.exec_module(cls.supervisor)
+
+    def test_supervisor_source_rejects_writable_ancestor(self):
+        unsafe = self.fixture_root / "untrusted"
+        unsafe.mkdir(mode=0o700)
+        source = unsafe / "ci_supervisor.py"
+        source.write_bytes(Path(self.supervisor.__file__).read_bytes())
+        source.chmod(0o600)
+        unsafe.chmod(0o777)
+        with patch.object(self.supervisor, "__file__", str(source)):
+            with self.assertRaises(ValueError):
+                self.supervisor._source_identity()
 
 
     @staticmethod
@@ -102,7 +128,7 @@ class ReleaseVerifyCISupervisorTests(unittest.TestCase):
         api = self.supervisor
         policy = self._policy(input_root=input_root)
         spec = api.parse_spec(self._raw_spec(stage), policy)
-        with tempfile.TemporaryDirectory(dir=Path.home()) as temporary:
+        with tempfile.TemporaryDirectory(dir=self.fixture_root) as temporary:
             home = Path(temporary)
             docker = home / "synthetic-docker"
             state_path = home / "container-state.json"
@@ -640,7 +666,7 @@ class ReleaseVerifyCISupervisorTests(unittest.TestCase):
 
     def test_unknown_create_retains_real_intent_despite_absent_inspections(self):
         api = self.supervisor
-        with tempfile.TemporaryDirectory(dir=Path.home()) as temporary:
+        with tempfile.TemporaryDirectory(dir=self.fixture_root) as temporary:
             root = Path(temporary) / "owned-control"
             root.mkdir(mode=0o700)
             ledger = {
@@ -687,7 +713,7 @@ class ReleaseVerifyCISupervisorTests(unittest.TestCase):
             def wait(self, timeout):
                 return 74
 
-        with tempfile.TemporaryDirectory(dir=Path.home()) as temporary:
+        with tempfile.TemporaryDirectory(dir=self.fixture_root) as temporary:
             home = Path(temporary)
             with ExitStack() as stack:
                 for name, value in (
@@ -736,7 +762,7 @@ class ReleaseVerifyCISupervisorTests(unittest.TestCase):
         # independently witnesses whether the controller submitted creation.
         for missing in ("memory_available_bytes", "disk_free_bytes",
                         "docker_root_disk_free_bytes"):
-            with self.subTest(counter=missing), tempfile.TemporaryDirectory(dir=Path.home()) as temporary:
+            with self.subTest(counter=missing), tempfile.TemporaryDirectory(dir=self.fixture_root) as temporary:
                 home = Path(temporary)
                 marker = home / "create-submitted"
                 docker = home / "synthetic-docker"
