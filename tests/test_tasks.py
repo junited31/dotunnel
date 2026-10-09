@@ -63,7 +63,7 @@ class TaskRunnerTests(unittest.IsolatedAsyncioTestCase):
     def process_is_running(pid):
         try:
             stat = Path(f"/proc/{pid}/stat").read_text()
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             return False
         state = stat.rsplit(") ", 1)[1].split()[0]
         return state not in {"Z", "X"}

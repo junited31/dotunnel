@@ -402,7 +402,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             def live(pid):
                 try:
                     return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] not in ('Z', 'X', 'x')
-                except FileNotFoundError:
+                except (FileNotFoundError, ProcessLookupError):
                     return False
 
             command = (
@@ -448,7 +448,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             def live(pid):
                 try:
                     return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] not in ('Z', 'X', 'x')
-                except FileNotFoundError:
+                except (FileNotFoundError, ProcessLookupError):
                     return False
 
             command = (
