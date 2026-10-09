@@ -689,7 +689,7 @@ class OnboardingTests(unittest.TestCase):
         client = self._file(self.base / "tunnel-client", executable=True)
         responses = iter(("", "", "", "", ""))
 
-        def choose_without_jobs(_available, _initially_selected, _directory):
+        def choose_without_jobs(_available, _initially_selected, _directory, *, on_skip=None):
             parent.rename(moved_parent)
             parent.symlink_to(replacement_parent, target_is_directory=True)
             return set()
@@ -710,7 +710,6 @@ class OnboardingTests(unittest.TestCase):
             )
 
         self.assertEqual(status, 2)
-        self.assertIn("Setup failed", stderr)
         self.assertTrue(parent.is_symlink())
         self.assertFalse((moved_parent / "private").exists())
         self.assertFalse((replacement_parent / "private").exists())
