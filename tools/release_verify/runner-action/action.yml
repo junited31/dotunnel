@@ -1,0 +1,5 @@
+name: Dotunnel receipt runner
+description: Runs the fixed bounded receipt verification dispatcher.
+runs:
+  using: node24
+  main: ../runner_dispatch.mjs
