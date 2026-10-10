@@ -424,6 +424,18 @@ Private GO and ledger locks have bounded acquisition. After the absolute deadlin
 
 A successful feasibility pilot requires independently inspected effective kernel limits and confirmed cleanup of its exact owned container, process tree and private control directory. Unit tests and a prerequisite probe do not establish Docker/bubblewrap confinement, installed CLI, SDK, live ChatGPT or native-agent success. Reports preserve the original failure separately from cleanup failures. No verification result publishes a release or grants production/provider access.
 
+### Manual GitHub-hosted prerequisite probe
+
+The separate `Manual verification host probe` workflow is manual-only and restricted to this repository's protected `main`; both the original actor and any rerun initiator must be the owner. It loads only bootstrap commit `74f9000c6b2fb4829642e2758d4848df6cfe70e5`, verifies the supervisor's fixed SHA-256 before importing it, and checks successful push/main CI and all three required jobs for that exact bootstrap. It does not execute PR inputs or change the existing required CI.
+
+```sh
+gh workflow run verification-host-probe.yml --repo junited31/dotunnel --ref main
+```
+
+The fixed Ubuntu 24.04 job attempts to collect prerequisite metadata, controller cgroup limits, and read-only Docker service limits. It does not pull an image, create a container, install prerequisites, use sudo, or execute packages, providers, live services or releases. Checkout is limited to two minutes, the probe step to three minutes, finalization and upload are separately bounded, and the complete job to ten minutes. Startup evidence is initialized before checkout; up to five bounded JSON records are uploaded for seven days when the runner reaches the upload step. The upload fails if no record exists.
+
+`AVAILABLE` requires the trusted supervisor's Linux/amd64, Docker and cgroup prerequisites, a successful Bubblewrap namespace test, and startup headroom of at least 8 GiB available memory and 4 GiB free on both the runner and Docker-root filesystems. Otherwise the probe is `BLOCKED` and the job fails. `host-boundaries` reports `OBSERVED` only when controller and Docker-service metadata and both cgroup limit sets were fully read; it reports `PARTIAL` when some but not all sources were observed, and `UNAVAILABLE` when none were. These are attempted metadata observations, not enforcement proof. Every result keeps `kernel_pilot_status=BLOCKED` and unverified independent lifetime enforcement. Failures before evidence initialization, runner termination, cancellation or a hard job timeout can prevent durable upload; a `RUNNING` startup record means finalization was not observed. Metadata, headroom monitoring, a command timeout or a userspace watchdog alone do not prove a full kernel pilot. Installed CLI/SDK and optional live/native scenario acceptance remain separate and unaccepted.
+
 ## Further reading
 
 - [Front page](../README.md) · [한국어 front page](../README.ko.md)

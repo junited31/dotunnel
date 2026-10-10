@@ -6,6 +6,8 @@
 - Document the supervisor and the limits of prerequisite/unit-test evidence in both guides. Existing push/PR workflows, required checks, package version, installer pins, release publication and runtime permissions are unchanged.
 - Separate the latched admission/execution telemetry failure from current cleanup samples, retaining the original cause without inventing a cleanup failure after recovery. Document the reviewed Linux/amd64-only image prerequisite.
 - Bound watchdog GO/ledger lock acquisition and recover deadline-expired controller lock ownership through the existing verified PID/birth termination path, preserving unresolved outcomes. Sample prerequisite Docker/bubblewrap waits, require actual host and daemon amd64 architecture, reject truncated create stderr, and leave the execution cause absent for cleanup-only failures.
+- Separate the read-only host probe into an owner-only protected-main workflow with actor-partitioned concurrency, bounded pre-checkout startup evidence, step/job deadlines, an explicit artifact error when evidence is absent, and exact bootstrap CI/source checks. Require Docker/cgroup and Bubblewrap namespace prerequisites plus documented start headroom for `AVAILABLE`; mark host-boundary reads `OBSERVED`, `PARTIAL`, or `UNAVAILABLE`. No kernel pilot, release publication or production/provider access is authorized.
+- Keep the host-probe identity reason accurate for AVAILABLE and BLOCKED prerequisite outcomes while kernel-pilot status remains blocked.
 
 ## 0.1.6 (2026-10-09)
 
