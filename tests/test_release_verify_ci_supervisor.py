@@ -1,5 +1,6 @@
 import importlib
 import importlib.util
+from dataclasses import replace
 import io
 import os
 import json
@@ -145,6 +146,7 @@ class ReleaseVerifyCISupervisorTests(unittest.TestCase):
 
     def _run_synthetic_pilot(
         self, *, stage, input_root=None, mutate_input=False, monitor_loss=False,
+        create_stderr_truncated=False, removal_fails=False,
     ):
         api = self.supervisor
         policy = self._policy(input_root=input_root)
@@ -223,6 +225,7 @@ class ReleaseVerifyCISupervisorTests(unittest.TestCase):
                 f"CONTAINER_NAME={_OWNED_NAME!r}\n"
                 f"STAGE={stage!r}\n"
                 f"MUTATE_INPUT={mutate_input!r}\n"
+                f"REMOVAL_FAILS={removal_fails!r}\n"
                 f"DETAILS=json.loads({json.dumps(json.dumps(details, separators=(',', ':')))})\n"
                 "def load_state():\n"
                 "    with open(STATE_PATH, encoding='utf-8') as stream: return json.load(stream)\n"
@@ -294,6 +297,7 @@ class ReleaseVerifyCISupervisorTests(unittest.TestCase):
                 "    try: os.kill(state['attach_pid'],signal.SIGTERM)\n"
                 "    except ProcessLookupError: pass\n"
                 "elif command[:2] == ['container','rm']:\n"
+                "    if REMOVAL_FAILS: log('rm-failed'); sys.exit(1)\n"
                 "    state.update(exists=False,running=False); save_state(state); log('rm')\n"
                 "else:\n"
                 "    sys.stderr.write('unexpected synthetic Docker command\\n'); sys.exit(2)\n"
@@ -327,6 +331,13 @@ class ReleaseVerifyCISupervisorTests(unittest.TestCase):
                         }
                 return healthy
 
+            real_docker_command = api._docker_command
+            def docker_command(docker_path, arguments, **kwargs):
+                result = real_docker_command(docker_path, arguments, **kwargs)
+                if create_stderr_truncated and arguments[0] == "create":
+                    return replace(result, stderr_truncated=True)
+                return result
+
             with ExitStack() as stack:
                 for name, value in (
                     ("_private_home", home),
@@ -346,6 +357,7 @@ class ReleaseVerifyCISupervisorTests(unittest.TestCase):
                 stack.enter_context(
                     patch.object(api, "_host_resources", side_effect=host_resources),
                 )
+                stack.enter_context(patch.object(api, "_docker_command", side_effect=docker_command))
                 result = api._run_pilot(spec, policy)
             commands = log_path.read_text(encoding="utf-8").splitlines()
             return (
@@ -457,6 +469,26 @@ class ReleaseVerifyCISupervisorTests(unittest.TestCase):
         self.assertIn("top-start", commands)
         self.assertIn("stop", commands)
         self.assertIn("rm", commands)
+
+    def test_create_truncated_stderr_rejects_cid_before_start(self):
+        result, commands, effect, *_ = self._run_synthetic_pilot(
+            stage="capabilities", create_stderr_truncated=True,
+        )
+        self.assertNotEqual(result["status"], "PASS", result)
+        self.assertEqual(result["original_cause"], "docker-create-outcome-ambiguous")
+        self.assertNotIn("start", commands)
+        self.assertFalse(effect)
+
+    def test_cleanup_only_failure_preserves_absent_execution_cause(self):
+        result, commands, effect, *_ = self._run_synthetic_pilot(
+            stage="capabilities", removal_fails=True,
+        )
+        self.assertTrue(effect)
+        self.assertIn("rm-failed", commands)
+        self.assertEqual(result["status"], "FAIL", result)
+        self.assertFalse(result["cleanup_confirmed"])
+        self.assertIsNone(result["original_cause"], result)
+        self.assertIn("owned-container-cleanup-unconfirmed", result["cleanup_failures"])
 
     def test_canonical_stages_use_the_fixed_bounded_core_policy(self):
         policy = self._policy()
