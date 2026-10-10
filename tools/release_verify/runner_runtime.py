@@ -509,7 +509,10 @@ def parse_handoff(raw: bytes, *, now_ns: int | None = None) -> Handoff:
     now = time.monotonic_ns() if now_ns is None else now_ns
     if type(now) is not int or deadline - now < 540 * _NS or deadline - now > 600 * _NS:
         _fail("outer-deadline-window")
-    identity = observe_process(value["dispatcher_pid"])
+    try:
+        identity = observe_process(value["dispatcher_pid"])
+    except ProcessLookupError:
+        _fail("dispatcher-identity-unavailable")
     _trust_dispatcher(identity)
     if identity.uid == 0:
         _fail("dispatcher-must-be-nonroot")

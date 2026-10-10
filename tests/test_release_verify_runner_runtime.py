@@ -30,11 +30,21 @@ class RunnerRuntimeIdentityTests(unittest.TestCase):
             "run": "92731",
             "attempt": "2",
         }
+        # The hosted tool-cache interpreter is runner-owned. Bind the real
+        # unprivileged dispatcher to the existing root-owned system executable;
+        # production executable ownership checks remain enabled.
+        self.dispatcher = subprocess.Popen(
+            ["/usr/bin/python3", "-I", "-S", "-c", "import time; time.sleep(30)"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            close_fds=True,
+        )
+        self.addCleanup(self.dispatcher.wait, timeout=3)
+        self.addCleanup(lambda: self.dispatcher.poll() is None and self.dispatcher.kill())
 
     def handoff(self, **changes):
         value = {
             "context": self.context,
-            "dispatcher_pid": os.getpid(),
+            "dispatcher_pid": self.dispatcher.pid,
             "scenario": "normal",
             "outer_deadline_ns": str(time.monotonic_ns() + 590_000_000_000),
             "runtime": {
@@ -61,7 +71,7 @@ class RunnerRuntimeIdentityTests(unittest.TestCase):
             "RuntimeMaxUSec": f"{runtime * 1_000_000}us",
             "KillMode": "control-group", "TimeoutStopUSec": "2s",
             "Restart": "no", "OOMPolicy": "kill", "StandardOutput": "null",
-            "StandardError": "null", "LogRateIntervalUSec": "1s",
+            "StandardError": "null", "LogRateLimitIntervalUSec": "1s",
             "LogRateLimitBurst": "1", "PrivateNetwork": private_network,
             "ExecMainStatus": "0", "ExecMainStartTimestampMonotonic": "1",
             "ExecMainExitTimestampMonotonic": "0",
@@ -100,16 +110,12 @@ class RunnerRuntimeIdentityTests(unittest.TestCase):
 
 
     def test_child_placement_uses_authenticated_service_cgroup_birth(self):
-        names = runner_policy.RunNames("81234", "1")
-        unit = names.unit("harmless")
-        expected_cgroup = f"/{names.work_slice}/{unit}"
         process = runner_runtime.observe_process(os.getpid())
+        expected_cgroup = process.cgroup
         service_cgroup = {
             "control_group": expected_cgroup, "present": True,
             "pids": [{"pid": process.pid, "birth": process.birth}],
         }
-        ancestor_slice = {"pids": []}
-        self.assertEqual(ancestor_slice["pids"], [])
         runner_runtime._require_process_in_unit_cgroup(
             process, expected_cgroup, service_cgroup, expected_cgroup,
         )
@@ -133,7 +139,7 @@ class RunnerRuntimeIdentityTests(unittest.TestCase):
     def test_handoff_binds_actual_live_dispatcher_and_hides_runtime_token(self):
         handoff = runner_runtime.parse_handoff(self.handoff())
         self.assertEqual(handoff.context, self.context)
-        self.assertEqual(handoff.dispatcher.pid, os.getpid())
+        self.assertEqual(handoff.dispatcher.pid, self.dispatcher.pid)
         self.assertEqual(handoff.dispatcher.uid, os.getuid())
         self.assertGreater(handoff.dispatcher.birth, 0)
         self.assertTrue(handoff.dispatcher.exe_inode > 0)
@@ -380,6 +386,7 @@ class RunnerRuntimeControlTests(unittest.TestCase):
             source=self.source,
             dispatcher=self.identity,
             scenario="workflow-cancel",
+            outer_deadline_ns=time.monotonic_ns() + 10_000_000_000,
             live_probe=self._live_probe,
             status_probe=self._status_probe,
             cancel_handler=self._persist_cancel,

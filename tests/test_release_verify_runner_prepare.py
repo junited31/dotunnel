@@ -1,3 +1,4 @@
+import hashlib
 import importlib
 import json
 import os
