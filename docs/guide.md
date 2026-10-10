@@ -404,7 +404,7 @@ Every prepared release includes its own fixed-pin installer. The front-page raw 
 
 ## 10. Maintainer verification supervisor
 
-`tools/release_verify/ci_supervisor.py` is a standalone, standard-library-only host tool. It is not installed with the wheel and is not an MCP tool. Existing push/PR CI, required checks, release publication and installation defaults are unchanged.
+`tools/release_verify/ci_supervisor.py` is a standalone, standard-library-only host tool. It is not installed with the wheel and is not an MCP tool. Required check names, release publication and installation defaults are unchanged.
 
 Run only reviewed, trusted supervisor bytes. Candidate input cannot supply a command, image, mount, Docker option or resource limit. Inspect prerequisites without creating a container:
 
@@ -435,6 +435,14 @@ gh workflow run verification-host-probe.yml --repo junited31/dotunnel --ref main
 The fixed Ubuntu 24.04 job attempts to collect prerequisite metadata, controller cgroup limits, and read-only Docker service limits. It does not pull an image, create a container, install prerequisites, use sudo, or execute packages, providers, live services or releases. Checkout is limited to two minutes, the probe step to three minutes, finalization and upload are separately bounded, and the complete job to ten minutes. Startup evidence is initialized before checkout; up to five bounded JSON records are uploaded for seven days when the runner reaches the upload step. The upload fails if no record exists.
 
 `AVAILABLE` requires the trusted supervisor's Linux/amd64, Docker and cgroup prerequisites, a successful Bubblewrap namespace test, and startup headroom of at least 8 GiB available memory and 4 GiB free on both the runner and Docker-root filesystems. Otherwise the probe is `BLOCKED` and the job fails. `host-boundaries` reports `OBSERVED` only when controller and Docker-service metadata and both cgroup limit sets were fully read; it reports `PARTIAL` when some but not all sources were observed, and `UNAVAILABLE` when none were. These are attempted metadata observations, not enforcement proof. Every result keeps `kernel_pilot_status=BLOCKED` and unverified independent lifetime enforcement. Failures before evidence initialization, runner termination, cancellation or a hard job timeout can prevent durable upload; a `RUNNING` startup record means finalization was not observed. Metadata, headroom monitoring, a command timeout or a userspace watchdog alone do not prove a full kernel pilot. Installed CLI/SDK and optional live/native scenario acceptance remain separate and unaccepted.
+
+### Runner receipt helpers and acceptance boundaries
+
+The standalone `runner_dispatch.mjs`, `runner_prepare.py`, `runner_runtime.py`, `runner_policy.py` and `runner_artifact.py` helpers are maintainer infrastructure, not installed package commands or MCP tools. Receipt authority binds the boot ID, helper source and nonce; GO is a once-only anonymous pipe capability. Cancellation preserves the first SIGINT notice separately from its later receipt. Terminal readback uses a sealed durable record after the live status endpoint closes; interrupted journal generations are not silently repaired or replayed.
+
+Existing required CI now exercises bounded real TLS/STREAM transport, actual Node subprocess signal/credential boundaries, search-only terminal descriptors and the isolated non-root receipt CLI refusal before the complete Python/adapter suites and installed-wheel checks. Bounded Python pilots disable bytecode writes so their output/file-size limit cannot corrupt shared interpreter caches. These checks perform no sudo, Root service, mount or Docker kernel pilot.
+
+Root preparation may run only from independently verified sealed source through a separately reviewed fixed disposable-runner workflow, after exact helper CI, full-code web review and protected-main integration. Missing trusted executables, source ownership, effective manager/cgroup controls, terminal delivery or revoked credentials remains `BLOCKED`/`NOT_ACCEPTED`; do not install prerequisites, extend deadlines or substitute a unit-test receipt. Normal completion and authentic external cancellation each need their own bounded invocation and independent terminal readback before claiming lifetime acceptance. Kernel confinement, installed/native/provider execution and live-service acceptance remain separate gates.
 
 ## Further reading
 

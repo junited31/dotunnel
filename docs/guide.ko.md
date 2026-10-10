@@ -393,7 +393,7 @@ gh workflow run release.yml --ref main -f dry_run=true
 
 ## 10. 유지보수자 검증 supervisor
 
-`tools/release_verify/ci_supervisor.py`는 표준 라이브러리만 사용하는 독립 host 도구입니다. wheel에 설치되지 않으며 MCP 도구도 아닙니다. 기존 push/PR CI·필수 check·릴리스 공개·설치 기본값은 변경하지 않습니다.
+`tools/release_verify/ci_supervisor.py`는 표준 라이브러리만 사용하는 독립 host 도구입니다. wheel에 설치되지 않으며 MCP 도구도 아닙니다. 필수 check 이름·릴리스 공개·설치 기본값은 변경하지 않습니다.
 
 검토된 신뢰 가능한 supervisor만 실행하세요. candidate 입력으로 명령·image·mount·Docker 옵션·자원 제한을 지정할 수 없습니다. container 생성 없이 전제 조건을 확인하려면:
 
@@ -424,6 +424,14 @@ gh workflow run verification-host-probe.yml --repo junited31/dotunnel --ref main
 고정 Ubuntu 24.04 job은 전제 조건, controller cgroup 제한, 읽기 전용 Docker service 제한의 메타데이터 관측을 시도합니다. image 다운로드·container 생성·전제 조건 설치·sudo, package/provider/live service 실행·릴리스는 하지 않습니다. checkout은 2분, probe 단계는 3분, 종료 기록·업로드도 각각 제한하며 전체 job은 10분입니다. checkout 전에 startup 기록을 만들고 업로드 단계에 도달하면 제한된 JSON 기록을 최대 5개, 7일간 보관합니다. 기록 파일이 없으면 업로드가 실패합니다.
 
 `AVAILABLE`은 신뢰된 supervisor의 Linux/amd64·Docker·cgroup 전제 조건, 성공한 Bubblewrap namespace 테스트, runner와 Docker-root 파일시스템 각각 최소 4 GiB 여유 공간 및 최소 8 GiB 가용 메모리를 요구합니다. 그렇지 않으면 `BLOCKED`와 job 실패를 기록합니다. `host-boundaries`는 controller와 Docker service 정보 및 두 cgroup 제한 집합을 모두 읽었을 때만 `OBSERVED`; 일부 출처만 읽었으면 `PARTIAL`, 하나도 읽지 못했으면 `UNAVAILABLE`입니다. 이는 시도한 메타데이터 관측이지 제한 강제 증거가 아닙니다. 모든 결과는 `kernel_pilot_status=BLOCKED`와 미검증 독립 수명 강제를 유지합니다. 증거 초기화 전 실패, runner 종료, 취소 또는 hard timeout은 기록 업로드를 막을 수 있습니다. `RUNNING` startup 기록은 종료 상태를 관측하지 못했다는 뜻입니다. 메타데이터·여유 자원 감시·명령 timeout·userspace watchdog만으로는 kernel 파일럿을 증명하지 않습니다. 설치 CLI/SDK와 선택적인 live/native 수용 검증은 여전히 별도 작업입니다.
+
+### Runner receipt helper와 수용 검증 경계
+
+독립 `runner_dispatch.mjs`·`runner_prepare.py`·`runner_runtime.py`·`runner_policy.py`·`runner_artifact.py`는 유지보수자용 기반 도구이며 설치 package 명령이나 MCP 도구가 아닙니다. receipt authority는 boot ID·helper source·nonce를 고정하고, GO는 한 번만 사용하는 anonymous pipe 권한입니다. 취소는 최초 SIGINT 통지와 나중의 수신 시각을 구분합니다. live status endpoint가 닫힌 뒤에도 봉인된 durable terminal 기록을 읽으며, 중단된 journal generation을 자동 복구하거나 재실행하지 않습니다.
+
+기존 필수 CI는 전체 Python/adapter suite와 설치 wheel 검증 전에 제한된 실제 TLS/STREAM 통신, 실제 Node subprocess의 signal·credential 경계, 검색 전용 terminal 디렉터리 FD와 격리된 non-root receipt CLI의 거부를 확인합니다. 제한된 Python pilot은 bytecode 쓰기를 비활성화하여 출력·파일 크기 제한이 공유 interpreter cache를 손상시키지 않게 합니다. 이 검증은 sudo·Root service·mount·Docker kernel pilot을 수행하지 않습니다.
+
+Root 준비는 정확한 helper CI·전체 코드 웹 리뷰·보호된 main 통합 이후, 별도로 검토한 고정 disposable-runner workflow에서 독립 확인된 봉인 source만 사용해야 합니다. 신뢰 실행 파일, source 소유권, 실제 manager/cgroup 제한, terminal 전달 또는 유효 credential이 없으면 `BLOCKED`/`NOT_ACCEPTED`이며 전제 조건 설치·deadline 연장·단위 테스트 receipt 대체를 하지 않습니다. 정상 종료와 실제 외부 취소는 각각 별도의 제한된 invocation과 독립 terminal readback이 있어야 수명 수용 검증으로 인정합니다. kernel 격리·설치/native/provider 실행·live service 수용 검증은 여전히 별도 gate입니다.
 
 ## 추가 참고
 
