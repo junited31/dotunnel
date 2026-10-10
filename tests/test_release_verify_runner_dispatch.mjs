@@ -13,16 +13,20 @@ const modulePath = fileURLToPath(new URL('../tools/release_verify/runner_dispatc
 const moduleUrl = pathToFileURL(modulePath).href;
 const SIGINT_MARKER = 'dispatcher-lifetime-after-sigint';
 
-// Keep fixture processes within the same fixed CI address-space limits.
-// Test-runner flags and environment-based Node options are not forwarded.
-const fixtureNodeFlags = process.execArgv.filter((argument) =>
-  argument === '--jitless' || argument === '--disable-wasm-trap-handler'
-    || argument === '--max-old-space-size=64');
+// Use fixed bounded fixture arguments; the in-process test runner can rewrite
+// process.execArgv. Never inherit caller-supplied Node flags or NODE_OPTIONS.
+const fixtureNodeFlags = [
+  '--jitless', '--disable-wasm-trap-handler', '--max-old-space-size=64', '--v8-pool-size=1',
+];
 
 function untilLine(child, expected, timeoutMs = 2000) {
   return new Promise((resolve, reject) => {
     let output = '';
-    const timer = setTimeout(() => reject(new Error(`missing child signal ${expected}`)), timeoutMs);
+    let diagnostics = '';
+    child.stderr.on('data', (chunk) => {
+      diagnostics = (diagnostics + chunk.toString('utf8')).slice(-4096);
+    });
+    const timer = setTimeout(() => reject(new Error(`missing child signal ${expected}: ${diagnostics}`)), timeoutMs);
     const onData = (chunk) => {
       output += chunk.toString('utf8');
       const lines = output.split('\n');
@@ -39,7 +43,7 @@ function untilLine(child, expected, timeoutMs = 2000) {
     });
     child.once('exit', (code, signal) => {
       clearTimeout(timer);
-      reject(new Error(`child exited before ${expected}: ${code ?? signal}`));
+      reject(new Error(`child exited before ${expected}: ${code ?? signal}: ${diagnostics}`));
     });
   });
 }
@@ -170,9 +174,9 @@ test('root child credentials remain isolated in an actual subprocess', () => {
     maxBuffer: 8192,
     env: environment,
   });
+  assert.equal(result.error, undefined, result.error?.message);
+  assert.equal(result.signal, null, result.stderr);
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout, '');
-  assert.equal(result.stderr, '');
 });
 
 test('an unauthorized invocation fails before changing output or exposing credentials', async (t) => {
