@@ -51,6 +51,25 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python }}
+      - name: Pilot actual command capture and manager durations without privilege
+        shell: bash
+        run: |
+          set -euo pipefail
+          cpu=$(python -c 'import os; print(min(os.sched_getaffinity(0)))')
+          log=$(mktemp "$RUNNER_TEMP/receipt-command.XXXXXX")
+          if (
+            ulimit -f 64
+            ulimit -c 0
+            PYTHONPATH="$GITHUB_WORKSPACE:$GITHUB_WORKSPACE/tests" \
+              /usr/bin/time -v timeout --signal=TERM --kill-after=2s 30s \
+              taskset -c "$cpu" prlimit --as=805306368 --nproc=64 --nofile=256 --cpu=20 -- \
+              python -B -m unittest -v \
+              test_release_verify_runner_command.RunnerCommandTests.test_actual_command_captures_both_streams_and_nonzero_exit \
+              test_release_verify_runner_command.RunnerManagerDurationTests.test_combined_and_single_manager_durations_are_exact
+          ) >"$log" 2>&1; then status=0; else status=$?; fi
+          cat "$log"
+          rm -- "$log"
+          exit "$status"
       - name: Pilot one real receipt transport regression
         shell: bash
         run: |
