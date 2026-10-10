@@ -8,7 +8,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: trusted-verification-host-probe
+  group: trusted-verification-host-probe-${{ github.actor }}-${{ github.triggering_actor }}
   cancel-in-progress: false
 
 jobs:
@@ -16,11 +16,45 @@ jobs:
     name: Manual read-only host feasibility
     if: github.repository == 'junited31/dotunnel' && github.ref == 'refs/heads/main' && github.actor == 'junited31' && github.triggering_actor == 'junited31'
     runs-on: ubuntu-24.04
-    timeout-minutes: 3
+    timeout-minutes: 10
     env:
       TRUSTED_BOOTSTRAP_SHA: 74f9000c6b2fb4829642e2758d4848df6cfe70e5
+      TRIGGERING_ACTOR: ${{ github.triggering_actor }}
     steps:
+      - name: Initialize bounded run evidence
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I -S - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ['RUNNER_TEMP']) / 'dotunnel-host-probe'
+          root.mkdir(mode=0o700)
+          value = {
+              'schema': 1, 'status': 'RUNNING', 'phase': 'initialized',
+              'repository': os.environ['GITHUB_REPOSITORY'],
+              'ref': os.environ['GITHUB_REF'], 'event': os.environ['GITHUB_EVENT_NAME'],
+              'workflow_sha': os.environ['GITHUB_SHA'],
+              'bootstrap_sha': os.environ['TRUSTED_BOOTSTRAP_SHA'],
+              'run_id': os.environ['GITHUB_RUN_ID'],
+              'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+              'actor': os.environ['GITHUB_ACTOR'],
+              'triggering_actor': os.environ['TRIGGERING_ACTOR'],
+              'kernel_pilot_status': 'BLOCKED',
+          }
+          data = json.dumps(value, ensure_ascii=True, allow_nan=False, sort_keys=True).encode()
+          if len(data) > 4096:
+              raise SystemExit('initial evidence bound exceeded')
+          with (root / 'startup.json').open('xb') as stream:
+              os.fchmod(stream.fileno(), 0o600)
+              stream.write(data)
+          PY
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 2
         with:
           repository: junited31/dotunnel
           ref: 74f9000c6b2fb4829642e2758d4848df6cfe70e5
@@ -29,6 +63,7 @@ jobs:
           path: trusted-bootstrap
 
       - name: Verify trusted source and capture read-only host evidence
+        timeout-minutes: 3
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -50,7 +85,7 @@ jobs:
                   or os.environ.get('GITHUB_REF') != 'refs/heads/main'
                   or os.environ.get('GITHUB_EVENT_NAME') != 'workflow_dispatch'
                   or os.environ.get('GITHUB_ACTOR') != 'junited31'
-                  or os.environ.get('GITHUB_TRIGGERING_ACTOR') != 'junited31'
+                  or os.environ.get('TRIGGERING_ACTOR') != 'junited31'
                   or os.environ.get('TRUSTED_BOOTSTRAP_SHA') != bootstrap
                   or os.geteuid() == 0
                   or re.fullmatch(r'[0-9a-f]{40}', os.environ.get('GITHUB_SHA', '')) is None):
@@ -72,7 +107,6 @@ jobs:
           sys.modules[spec.name] = supervisor
           spec.loader.exec_module(supervisor)
           output_root = Path(os.environ['RUNNER_TEMP']) / 'dotunnel-host-probe'
-          output_root.mkdir(mode=0o700)
 
           def record(name, value):
               data = json.dumps(value, ensure_ascii=True, allow_nan=False, sort_keys=True).encode()
@@ -89,7 +123,7 @@ jobs:
               'checkout_action_sha': '3d3c42e5aac5ba805825da76410c181273ba90b1',
               'artifact_action_sha': 'ea165f8d65b6e75b540449e92b4886f43607fa02',
               'run_id': os.environ['GITHUB_RUN_ID'], 'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
-              'triggering_actor': os.environ['GITHUB_TRIGGERING_ACTOR'],
+              'triggering_actor': os.environ['TRIGGERING_ACTOR'],
               'runner_os': os.environ.get('RUNNER_OS'), 'runner_arch': os.environ.get('RUNNER_ARCH'),
               'evidence': 'read-only-host-prerequisites-not-kernel-confinement',
               'kernel_pilot_status': 'BLOCKED',
@@ -135,6 +169,47 @@ jobs:
                   api_env.pop('GH_TOKEN')
 
               probe = supervisor.probe()
+              if not isinstance(probe, dict):
+                  raise RuntimeError('trusted supervisor returned invalid prerequisite evidence')
+              supervisor_status = probe.get('status')
+              supervisor_reasons = probe.get('reasons')
+              if not isinstance(supervisor_reasons, list) or any(
+                      not isinstance(reason, str) for reason in supervisor_reasons):
+                  supervisor_reasons = ['supervisor-probe-reasons-unavailable']
+              gate_reasons = []
+              bubblewrap = probe.get('bwrap')
+              if not isinstance(bubblewrap, dict) or bubblewrap.get('available') is not True:
+                  gate_reasons.append('bubblewrap-unavailable')
+              if not isinstance(bubblewrap, dict) or bubblewrap.get('namespace_test') != 'available':
+                  gate_reasons.append('bubblewrap-namespace-test-unavailable')
+              resources = probe.get('host_resources')
+              resource_floors = {
+                  'memory_available_bytes': 8 * 1024**3,
+                  'disk_free_bytes': 4 * 1024**3,
+                  'docker_root_disk_free_bytes': 4 * 1024**3,
+              }
+              if not isinstance(resources, dict):
+                  gate_reasons.append('host-resource-telemetry-unavailable')
+              else:
+                  for key, floor in resource_floors.items():
+                      value = resources.get(key)
+                      if type(value) is not int or value < 0:
+                          gate_reasons.append('host-resource-telemetry-unavailable:' + key)
+                      elif value < floor:
+                          gate_reasons.append('host-resource-headroom-insufficient:' + key)
+              probe['supervisor_status'] = supervisor_status
+              probe['supervisor_reasons'] = supervisor_reasons
+              probe['workflow_gate_reasons'] = gate_reasons
+              probe['minimum_start_resources_bytes'] = resource_floors
+              probe['status'] = (
+                  'AVAILABLE'
+                  if supervisor_status == 'AVAILABLE' and not supervisor_reasons and not gate_reasons
+                  else 'BLOCKED'
+              )
+              probe['reasons'] = sorted(set(supervisor_reasons + gate_reasons))
+              probe['status_semantics'] = (
+                  'supervisor-prerequisites-bubblewrap-and-start-headroom;not-kernel-pilot'
+              )
               record('probe', probe)
               def bounded_text(path, maximum=4096):
                   with path.open('rb') as stream:
@@ -169,22 +244,39 @@ jobs:
                    '--property=' + ','.join(properties)],
                   timeout=5, stdout_limit=16384, stderr_limit=4096,
               )
-              daemon = {}
+              daemon = {'status': 'UNAVAILABLE', 'reason': 'docker-service-metadata-unavailable'}
               if (unit.returncode == 0 and not unit.timed_out
                       and not unit.stdout_truncated and not unit.stderr_truncated):
+                  observed = {}
                   for line in unit.stdout.decode('ascii').splitlines():
                       key, separator, value = line.partition('=')
                       if separator and key in properties:
-                          daemon[key] = value
+                          observed[key] = value
+                  if set(properties) <= observed.keys():
+                      daemon = {'status': 'OBSERVED', **observed}
+              controller = cgroup_limits(controller_path)
+              docker_service_cgroup = cgroup_limits(daemon.get('ControlGroup'))
+              boundary_statuses = (
+                  daemon['status'], controller['status'], docker_service_cgroup['status']
+              )
+              observed_count = sum(status == 'OBSERVED' for status in boundary_statuses)
+              boundary_status = (
+                  'OBSERVED' if observed_count == len(boundary_statuses)
+                  else 'PARTIAL' if observed_count
+                  else 'UNAVAILABLE'
+              )
               record('host-boundaries', {
-                  'schema': 1, 'status': 'OBSERVED', 'evidence': 'read-only-metadata-not-enforcement-proof',
-                  'controller': cgroup_limits(controller_path), 'docker_service': daemon,
-                  'docker_service_cgroup': cgroup_limits(daemon.get('ControlGroup')),
+                  'schema': 1, 'status': boundary_status,
+                  'evidence': 'read-only-metadata-not-enforcement-proof',
+                  'controller': controller, 'docker_service': daemon,
+                  'docker_service_cgroup': docker_service_cgroup,
                   'kernel': os.uname().release,
                   'independent_lifetime_verified': False,
               })
-              identity['status'] = probe.get('status', 'BLOCKED')
-              identity['reason'] = 'read-only-probe-completed-kernel-pilot-remains-blocked'
+              identity['status'] = probe['status']
+              identity['reason'] = (
+                  'host-prerequisites-or-start-headroom-unavailable;kernel-pilot-remains-blocked'
+              )
               if identity['status'] != 'AVAILABLE':
                   raise SystemExit(2)
           except Exception as error:
@@ -195,12 +287,50 @@ jobs:
               record('identity', identity)
           PY
 
+      - name: Finalize startup evidence
+        if: always()
+        timeout-minutes: 1
+        env:
+          JOB_STATUS: ${{ job.status }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I -S - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ['RUNNER_TEMP']) / 'dotunnel-host-probe'
+          path = root / 'startup.json'
+          raw = path.read_bytes()
+          if len(raw) > 4096:
+              raise SystemExit('initial evidence bound exceeded')
+          value = json.loads(raw)
+          if not isinstance(value, dict) or value.get('schema') != 1:
+              raise SystemExit('initial evidence invalid')
+          outcome = os.environ.get('JOB_STATUS', 'unknown')
+          value['job_outcome'] = outcome
+          value['status'] = (
+              'COMPLETE' if outcome == 'success'
+              else 'FAILED' if outcome == 'failure'
+              else 'INCOMPLETE'
+          )
+          value['phase'] = 'finalized'
+          data = json.dumps(value, ensure_ascii=True, allow_nan=False, sort_keys=True).encode()
+          temporary = root / 'startup.tmp'
+          with temporary.open('xb') as stream:
+              os.fchmod(stream.fileno(), 0o600)
+              stream.write(data)
+          os.replace(temporary, path)
+          PY
+
       - name: Retain bounded prerequisite evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        timeout-minutes: 2
         with:
           name: host-probe-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/dotunnel-host-probe/*.json
-          if-no-files-found: warn
+          if-no-files-found: error
           compression-level: 0
           retention-days: 7

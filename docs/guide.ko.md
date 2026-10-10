@@ -421,9 +421,9 @@ python3 -I tools/release_verify/ci_supervisor.py probe
 gh workflow run verification-host-probe.yml --repo junited31/dotunnel --ref main
 ```
 
-고정 Ubuntu 24.04 job은 전제 조건, controller cgroup 제한, 읽기 전용 Docker service 제한을 수집합니다. image 다운로드·container 생성·전제 조건 설치·sudo, package/provider/live service 실행·릴리스는 하지 않습니다. 3분 job에서 subprocess 대기·출력을 제한하고 JSON 기록 4개를 7일 보관합니다.
+고정 Ubuntu 24.04 job은 전제 조건, controller cgroup 제한, 읽기 전용 Docker service 제한의 메타데이터 관측을 시도합니다. image 다운로드·container 생성·전제 조건 설치·sudo, package/provider/live service 실행·릴리스는 하지 않습니다. checkout은 2분, probe 단계는 3분, 종료 기록·업로드도 각각 제한하며 전체 job은 10분입니다. checkout 전에 startup 기록을 만들고 업로드 단계에 도달하면 제한된 JSON 기록을 최대 5개, 7일간 보관합니다. 기록 파일이 없으면 업로드가 실패합니다.
 
-`AVAILABLE`은 전제 조건 probe 완료이지 kernel 파일럿 성공이 아닙니다. 기록에는 `kernel_pilot_status=BLOCKED`와 미검증 독립 수명 강제를 명시합니다. controller 오류·사용 불가능한 전제 조건은 probe job 실패입니다. 전체 kernel 파일럿에는 별도 승인과 preparation/controller/daemon의 독립 강제 자원·수명 경계가 필요하며 메타데이터·여유 자원 감시·명령 timeout·userspace watchdog만으로는 증명되지 않습니다. 설치 CLI/SDK 및 선택적인 live/native 시나리오의 수용 검증도 별도로 남아 있습니다.
+`AVAILABLE`은 신뢰된 supervisor의 Linux/amd64·Docker·cgroup 전제 조건, 성공한 Bubblewrap namespace 테스트, runner와 Docker-root 파일시스템 각각 최소 4 GiB 여유 공간 및 최소 8 GiB 가용 메모리를 요구합니다. 그렇지 않으면 `BLOCKED`와 job 실패를 기록합니다. `host-boundaries`는 controller와 Docker service 정보 및 두 cgroup 제한 집합을 모두 읽었을 때만 `OBSERVED`; 일부 출처만 읽었으면 `PARTIAL`, 하나도 읽지 못했으면 `UNAVAILABLE`입니다. 이는 시도한 메타데이터 관측이지 제한 강제 증거가 아닙니다. 모든 결과는 `kernel_pilot_status=BLOCKED`와 미검증 독립 수명 강제를 유지합니다. 증거 초기화 전 실패, runner 종료, 취소 또는 hard timeout은 기록 업로드를 막을 수 있습니다. `RUNNING` startup 기록은 종료 상태를 관측하지 못했다는 뜻입니다. 메타데이터·여유 자원 감시·명령 timeout·userspace watchdog만으로는 kernel 파일럿을 증명하지 않습니다. 설치 CLI/SDK와 선택적인 live/native 수용 검증은 여전히 별도 작업입니다.
 
 ## 추가 참고
 
