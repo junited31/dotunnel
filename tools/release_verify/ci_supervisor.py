@@ -2921,7 +2921,7 @@ def _run_pilot(spec: _Spec, policy: Policy) -> dict[str, object]:
                 resource_check=check_resources,
             )
             candidate_id = create.stdout.decode("ascii", "strict").strip() if not create.stdout_truncated else ""
-            if create.returncode != 0 or create.timed_out or create.stdout_truncated or _CONTAINER_ID_RE.fullmatch(candidate_id) is None:
+            if create.returncode != 0 or create.timed_out or create.stdout_truncated or create.stderr_truncated or _CONTAINER_ID_RE.fullmatch(candidate_id) is None:
                 reason = "docker-create-outcome-ambiguous"
                 status = "BLOCKED"
                 raise RuntimeError("ambiguous Docker create; automatic replay is forbidden")
@@ -3226,10 +3226,6 @@ def _run_pilot(spec: _Spec, policy: Policy) -> dict[str, object]:
                 if status == "PASS":
                     status = "FAIL"
                     reason = resource_failure
-                if original_cause is None:
-                    original_cause = resource_failure
-            if original_cause is None and status != "PASS":
-                original_cause = cleanup_resource_failure or reason
             captured["host_stdout_bytes_limit"] = CORE_LIMITS.stdout_bytes
             captured["host_stderr_bytes_limit"] = CORE_LIMITS.stderr_bytes
             captured["host_output_bytes_stored"] = (
