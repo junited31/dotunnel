@@ -2784,10 +2784,12 @@ def _run_pilot(spec: _Spec, policy: Policy) -> dict[str, object]:
         if allow_missing_docker_root and docker_root_path is None:
             memory = current.get("memory_available_bytes")
             disk = current.get("disk_free_bytes")
+            memory_floor = _HOST_START_MEMORY_BYTES if initial else _HOST_MIN_MEMORY_BYTES
+            disk_floor = _HOST_START_DISK_BYTES if initial else _HOST_MIN_DISK_BYTES
             if type(memory) is not int or type(disk) is not int or min(memory, disk) < 0:
                 failure = "host-resource-telemetry-unavailable"
-            elif memory < _HOST_START_MEMORY_BYTES or disk < _HOST_START_DISK_BYTES:
-                failure = "host-resource-headroom-insufficient"
+            elif memory < memory_floor or disk < disk_floor:
+                failure = "host-resource-headroom-insufficient" if initial else "host-resource-pressure"
             else:
                 failure = None
         else:
@@ -2834,7 +2836,7 @@ def _run_pilot(spec: _Spec, policy: Policy) -> dict[str, object]:
     def cleanup_resources() -> None:
         nonlocal reason, status, resource_failure, cleanup_resource_failure
         try:
-            failure = sample_resources()
+            failure = sample_resources(allow_missing_docker_root=not docker_root_discovered)
         except Exception:
             if resource_failure is None:
                 resource_failure = "host-resource-telemetry-unavailable"
