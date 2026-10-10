@@ -51,6 +51,128 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+      - name: Pilot owned stopped-unit, publisher timeout, and concurrent cancellation behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          cpu=$(python -c 'import os; print(min(os.sched_getaffinity(0)))')
+          log=$(mktemp "$RUNNER_TEMP/receipt-lifecycle.XXXXXX")
+          if (
+            ulimit -f 64
+            ulimit -c 0
+            /usr/bin/time -v timeout --signal=TERM --kill-after=2s 30s \
+              taskset --cpu-list "$cpu" \
+              prlimit --as=805306368 --nproc=64 --nofile=256 --cpu=20 -- \
+              env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$GITHUB_WORKSPACE:$GITHUB_WORKSPACE/tests" \
+              python -B -m unittest -v \
+                test_release_verify_runner_lifecycle.OwnedPublisherLifecycleTests.test_inactive_empty_manager_cgroup_retains_and_proves_the_recorded_generation \
+                test_release_verify_runner_lifecycle.OwnedPublisherLifecycleTests.test_publisher_deadline_stops_before_the_same_deadline_and_persists_unknown \
+                test_release_verify_runner_control_concurrency.RunnerControlConcurrencyTests.test_first_cancel_is_acknowledged_within_delivery_budget_while_status_probe_waits
+          ) >"$log" 2>&1; then status=0; else status=$?; fi
+          cat "$log"
+          rm -- "$log"
+          exit "$status"
+      - name: Pilot actual command capture and manager durations without privilege
+        shell: bash
+        run: |
+          set -euo pipefail
+          cpu=$(python -c 'import os; print(min(os.sched_getaffinity(0)))')
+          log=$(mktemp "$RUNNER_TEMP/receipt-command.XXXXXX")
+          if (
+            ulimit -f 64
+            ulimit -c 0
+            PYTHONPATH="$GITHUB_WORKSPACE:$GITHUB_WORKSPACE/tests" \
+              /usr/bin/time -v timeout --signal=TERM --kill-after=2s 30s \
+              taskset -c "$cpu" prlimit --as=805306368 --nproc=64 --nofile=256 --cpu=20 -- \
+              python -B -m unittest -v \
+              test_release_verify_runner_command.RunnerCommandTests.test_actual_command_captures_both_streams_and_nonzero_exit \
+              test_release_verify_runner_command.RunnerManagerDurationTests.test_combined_and_single_manager_durations_are_exact
+          ) >"$log" 2>&1; then status=0; else status=$?; fi
+          cat "$log"
+          rm -- "$log"
+          exit "$status"
+      - name: Pilot one real receipt transport regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          cpu=$(python -c 'import os; print(min(os.sched_getaffinity(0)))')
+          log=$(mktemp "$RUNNER_TEMP/receipt-transport.XXXXXX")
+          if (
+            ulimit -f 64
+            ulimit -c 0
+            # RLIMIT_FSIZE also caps bytecode files; never mutate shared Python caches.
+            PYTHONPATH="$GITHUB_WORKSPACE:$GITHUB_WORKSPACE/tests" \
+              /usr/bin/time -v timeout --signal=TERM --kill-after=2s 30s \
+              taskset -c "$cpu" prlimit --as=805306368 --nproc=64 --nofile=256 --cpu=20 -- \
+              python -B -m unittest -v \
+              test_release_verify_runner_transport.RunnerTransportTests.test_idle_authorized_tls_tunnel_does_not_starve_create
+          ) >"$log" 2>&1; then status=0; else status=$?; fi
+          cat "$log"
+          rm -- "$log"
+          exit "$status"
+      - name: Pilot and exercise real Node receipt entry
+        if: matrix.python == '3.11'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cpu=$(python -c 'import os; print(min(os.sched_getaffinity(0)))')
+          node --version
+          run_node() {
+            local log status
+            log=$(mktemp "$RUNNER_TEMP/receipt-node.XXXXXX")
+            if (
+              ulimit -f 64
+              ulimit -c 0
+              /usr/bin/time -v timeout --signal=TERM --kill-after=2s 30s \
+                taskset -c "$cpu" prlimit --as=805306368 --nproc=64 --nofile=256 --cpu=20 -- \
+                node --jitless --disable-wasm-trap-handler --max-old-space-size=64 --v8-pool-size=1 \
+                --test --test-isolation=none --test-reporter=tap "$@" tests/test_release_verify_runner_dispatch.mjs
+            ) >"$log" 2>&1; then status=0; else status=$?; fi
+            cat "$log"
+            rm -- "$log"
+            return "$status"
+          }
+          run_node --test-name-pattern='terminal record remains readable'
+          run_node
+      - name: Smoke actual receipt CLI without privileged authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          cpu=$(python -c 'import os; print(min(os.sched_getaffinity(0)))')
+          log=$(mktemp "$RUNNER_TEMP/receipt-entry.XXXXXX")
+          if (
+            ulimit -f 64
+            ulimit -c 0
+            /usr/bin/time -v timeout --signal=TERM --kill-after=2s 15s \
+              taskset -c "$cpu" prlimit --as=805306368 --nproc=64 --nofile=256 --cpu=10 -- \
+              python -I -S -B - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+          import time
+          assert os.geteuid() != 0, 'smoke must not acquire root'
+          run = str(time.monotonic_ns())
+          prefix = 'dotunnelpilot' + run + 'a1'
+          paths = (Path('/run') / prefix, Path('/run') / (prefix + '-source'))
+          assert all(not path.exists() and not path.is_symlink() for path in paths)
+          command = [sys.executable, '-I', '-S', '-B', str(Path.cwd() / 'tools/release_verify/runner_prepare.py'), 'receipt-start', run, '1']
+          result = subprocess.run(command, input=b'not-an-authorized-runtime-payload', stdout=subprocess.PIPE, stderr=subprocess.PIPE, env={'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'}, timeout=3, check=False)
+          assert result.returncode == 2, (result.returncode, result.stderr[:512])
+          assert len(result.stdout) <= 4096 and not result.stderr
+          observed = json.loads(result.stdout)
+          assert observed == {'status': 'BLOCKED', 'reason': 'trusted-root-required'}, observed
+          assert all(not path.exists() and not path.is_symlink() for path in paths)
+          print(json.dumps({'scenario': 'actual-unprivileged-root-entry', 'result': 'PASS', 'exit': result.returncode, 'observed': observed, 'authority_and_source_absent': True, 'root_kernel_receipt_acceptance': 'NOT_VERIFIED'}, sort_keys=True))
+          PY
+          ) >"$log" 2>&1; then status=0; else status=$?; fi
+          cat "$log"
+          rm -- "$log"
+          exit "$status"
       - name: Install package and build tools
         run: python -m pip install --disable-pip-version-check . build
       - name: Run regression suite

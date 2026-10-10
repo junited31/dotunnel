@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add standalone maintainer runner receipt helpers with boot/source/nonce-bound authority, once-only anonymous GO admission, bounded authenticated STREAM control and durable terminal readback after the live endpoint closes. Preserve interrupted journal generations, original cancellation notice timestamps and ownership-safe role cleanup.
+- Read idle TLS requests before acquiring the shared policy-exchange lock; use search-only terminal directory descriptors and allow root executable owner-write while rejecting group/world write.
+- Exercise bounded real transport, Node subprocess signal/credential and non-root receipt refusal paths in the existing required CI before complete regressions and installed-wheel checks. Disable Python bytecode writes under the fixed file-size cap. These checks do not establish Root/kernel lifetime or confinement acceptance; a separately reviewed disposable-runner workflow and independent normal/cancellation readback remain required.
 - Add a standalone maintainer-only Linux verification supervisor with fixed Docker pilot limits, bounded SHA-256 input-tree admission rechecked across execution, independently inspected kernel controls, bounded output and ownership-checked cleanup. Monitor host resources through subprocess/readiness waits; missing telemetry or insufficient memory/disk headroom blocks execution and stays failed after transient recovery. Preserve original failures separately while owned cleanup continues.
 - Document the supervisor and the limits of prerequisite/unit-test evidence in both guides. Existing push/PR workflows, required checks, package version, installer pins, release publication and runtime permissions are unchanged.
 - Separate the latched admission/execution telemetry failure from current cleanup samples, retaining the original cause without inventing a cleanup failure after recovery. Document the reviewed Linux/amd64-only image prerequisite.
