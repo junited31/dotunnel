@@ -391,6 +391,28 @@ gh workflow run release.yml --ref main -f dry_run=true
 
 각 준비된 릴리스에는 해당 wheel을 고정한 설치 스크립트가 포함됩니다. front page의 raw `main/install.sh`는 별도로 검토된 pin을 유지합니다. 기본 pin 갱신은 실제 공개 wheel의 byte 수와 SHA를 사용하는 일반 PR로 처리하며 자동 변경하지 않습니다. 이미 공개된 wheel의 checksum을 dry-run 재빌드 checksum으로 바꾸지 마세요.
 
+## 10. 유지보수자 검증 supervisor
+
+`tools/release_verify/ci_supervisor.py`는 표준 라이브러리만 사용하는 독립 host 도구입니다. wheel에 설치되지 않으며 MCP 도구도 아닙니다. 기존 push/PR CI·필수 check·릴리스 공개·설치 기본값은 변경하지 않습니다.
+
+검토된 신뢰 가능한 supervisor만 실행하세요. candidate 입력으로 명령·image·mount·Docker 옵션·자원 제한을 지정할 수 없습니다. container 생성 없이 전제 조건을 확인하려면:
+
+```sh
+python3 -I tools/release_verify/ci_supervisor.py probe
+```
+
+유한 `pilot` 명령은 `--stage capabilities` 또는 `--stage hostile-pilot`, 독점적인 소문자 16진수 32자리 `--run-id`, 선택적인 불변 `--input-root`만 받습니다. 승인된 전용 non-root Linux/amd64 Docker host를 사용하세요. 신뢰 이미지 정책은 arm64를 허용하지 않으며, 검토되지 않은 이미지를 선택하지 않고 `BLOCKED`로 끝납니다. Docker·계측·소유권·제한 강제가 없으면 `BLOCKED`이며 전제 조건을 자동 설치하거나 완화하지 않습니다.
+
+신뢰 정책은 container RAM 512MiB·swap 0·CPU 50%·process 64개·wall 180초·쓰기 scratch 256MiB·stdout/stderr 각각 64KiB·종료 유예 2초를 고정합니다. 시작 시 여유 메모리 8GiB와 control·Docker-root 파일시스템 각각 여유 디스크 4GiB가 추가로 필요합니다. 실행 중 계측이 없거나 메모리 6GiB / 디스크 2GiB 미만이면 중단하며 제한을 높이지 않습니다.
+
+검토한 입력은 제한된 SHA-256 tree manifest로 확인하며 create/start/GO 전과 정리 후 다시 검증합니다. read-only mount만으로 host 파일의 불변성이 증명되지는 않습니다. Docker 명령·준비 대기 중에도 자원을 감시합니다. 일시적인 계측 실패는 복구되어도 실패로 유지하며, 정확히 소유한 자원의 정리는 계속 수행합니다.
+
+전제 조건을 확인하는 Docker version/info와 bubblewrap subprocess도 감시합니다. Docker-root 경로를 발견하기 전에는 host 메모리와 control 파일시스템을 감시하고, 발견한 뒤에는 세 계측값을 모두 요구합니다. 실제 host와 Docker daemon 모두 `amd64` 또는 `x86_64`여야 하며, cached image 메타데이터만으로 허용하지 않습니다.
+
+비공개 GO·ledger lock 획득에는 유한 대기 제한이 있습니다. 절대 deadline 이후 독립 watchdog은 기록된 controller의 PID·생성 식별자가 일치하는 경우에만 종료하고 경합 lock 획득을 재시도할 수 있습니다. 종료·fence·정리를 확인하지 못하면 unresolved로 남으며 성공으로 보고하지 않습니다.
+
+파일럿 성공에는 실제 kernel 제한의 독립 확인과 정확히 소유한 container·process tree·비공개 control 디렉터리의 정리 증거가 필요합니다. 단위 테스트·전제 조건 probe는 Docker/bubblewrap 격리, 설치 CLI, SDK, 실제 ChatGPT 또는 native agent 성공을 증명하지 않습니다. 보고서는 원래 실패와 정리 실패를 별도로 보존합니다. 검증 결과가 릴리스를 공개하거나 운영·provider 권한을 부여하지 않습니다.
+
 ## 추가 참고
 
 - [English front page](../README.md) · [한국어 front page](../README.ko.md)
