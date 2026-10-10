@@ -54,12 +54,12 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '24'
-      - name: Reproduce reviewed official SDK protocol and transient-output-FD failures
+      - name: Pilot owned stopped-unit, publisher timeout, and concurrent cancellation behavior
         shell: bash
         run: |
           set -euo pipefail
           cpu=$(python -c 'import os; print(min(os.sched_getaffinity(0)))')
-          log=$(mktemp "$RUNNER_TEMP/receipt-sdk-baseline.XXXXXX")
+          log=$(mktemp "$RUNNER_TEMP/receipt-lifecycle.XXXXXX")
           if (
             ulimit -f 64
             ulimit -c 0
@@ -67,7 +67,10 @@ jobs:
               taskset --cpu-list "$cpu" \
               prlimit --as=805306368 --nproc=64 --nofile=256 --cpu=20 -- \
               env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$GITHUB_WORKSPACE:$GITHUB_WORKSPACE/tests" \
-              python -B tests/sdk_baseline_probe.py
+              python -B -m unittest -v \
+                test_release_verify_runner_lifecycle.OwnedPublisherLifecycleTests.test_inactive_empty_manager_cgroup_retains_and_proves_the_recorded_generation \
+                test_release_verify_runner_lifecycle.OwnedPublisherLifecycleTests.test_publisher_deadline_stops_before_the_same_deadline_and_persists_unknown \
+                test_release_verify_runner_control_concurrency.RunnerControlConcurrencyTests.test_first_cancel_is_acknowledged_within_delivery_budget_while_status_probe_waits
           ) >"$log" 2>&1; then status=0; else status=$?; fi
           cat "$log"
           rm -- "$log"
