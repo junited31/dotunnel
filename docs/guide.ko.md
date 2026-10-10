@@ -413,6 +413,18 @@ python3 -I tools/release_verify/ci_supervisor.py probe
 
 파일럿 성공에는 실제 kernel 제한의 독립 확인과 정확히 소유한 container·process tree·비공개 control 디렉터리의 정리 증거가 필요합니다. 단위 테스트·전제 조건 probe는 Docker/bubblewrap 격리, 설치 CLI, SDK, 실제 ChatGPT 또는 native agent 성공을 증명하지 않습니다. 보고서는 원래 실패와 정리 실패를 별도로 보존합니다. 검증 결과가 릴리스를 공개하거나 운영·provider 권한을 부여하지 않습니다.
 
+### GitHub-hosted 수동 전제 조건 probe
+
+별도 `Manual verification host probe` workflow는 보호된 `main`에서 수동 실행할 때만 동작하며 최초 actor와 재실행 요청자 모두 저장소 owner여야 합니다. bootstrap commit `74f9000c6b2fb4829642e2758d4848df6cfe70e5`만 사용하고, supervisor의 고정 SHA-256을 import 전에 확인하며 해당 bootstrap의 push/main CI와 필수 세 job 성공을 검증합니다. PR 입력을 실행하거나 기존 필수 CI를 바꾸지 않습니다.
+
+```sh
+gh workflow run verification-host-probe.yml --repo junited31/dotunnel --ref main
+```
+
+고정 Ubuntu 24.04 job은 전제 조건, controller cgroup 제한, 읽기 전용 Docker service 제한을 수집합니다. image 다운로드·container 생성·전제 조건 설치·sudo, package/provider/live service 실행·릴리스는 하지 않습니다. 3분 job에서 subprocess 대기·출력을 제한하고 JSON 기록 4개를 7일 보관합니다.
+
+`AVAILABLE`은 전제 조건 probe 완료이지 kernel 파일럿 성공이 아닙니다. 기록에는 `kernel_pilot_status=BLOCKED`와 미검증 독립 수명 강제를 명시합니다. controller 오류·사용 불가능한 전제 조건은 probe job 실패입니다. 전체 kernel 파일럿에는 별도 승인과 preparation/controller/daemon의 독립 강제 자원·수명 경계가 필요하며 메타데이터·여유 자원 감시·명령 timeout·userspace watchdog만으로는 증명되지 않습니다. 설치 CLI/SDK 및 선택적인 live/native 시나리오의 수용 검증도 별도로 남아 있습니다.
+
 ## 추가 참고
 
 - [English front page](../README.md) · [한국어 front page](../README.ko.md)

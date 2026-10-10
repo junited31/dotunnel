@@ -6,6 +6,7 @@
 - Document the supervisor and the limits of prerequisite/unit-test evidence in both guides. Existing push/PR workflows, required checks, package version, installer pins, release publication and runtime permissions are unchanged.
 - Separate the latched admission/execution telemetry failure from current cleanup samples, retaining the original cause without inventing a cleanup failure after recovery. Document the reviewed Linux/amd64-only image prerequisite.
 - Bound watchdog GO/ledger lock acquisition and recover deadline-expired controller lock ownership through the existing verified PID/birth termination path, preserving unresolved outcomes. Sample prerequisite Docker/bubblewrap waits, require actual host and daemon amd64 architecture, reject truncated create stderr, and leave the execution cause absent for cleanup-only failures.
+- Add a separate owner-only, protected-main read-only host probe verifying the fixed reviewed bootstrap digest and its exact successful main CI, capturing Ubuntu prerequisite/controller/Docker-service limits with bounded evidence. Owner-only reruns are enforced; image preparation, container execution and full kernel proof remain blocked pending independent host enforcement. Existing required CI, release publication and production/provider access remain unchanged.
 
 ## 0.1.6 (2026-10-09)
 

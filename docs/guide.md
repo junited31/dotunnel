@@ -424,6 +424,18 @@ Private GO and ledger locks have bounded acquisition. After the absolute deadlin
 
 A successful feasibility pilot requires independently inspected effective kernel limits and confirmed cleanup of its exact owned container, process tree and private control directory. Unit tests and a prerequisite probe do not establish Docker/bubblewrap confinement, installed CLI, SDK, live ChatGPT or native-agent success. Reports preserve the original failure separately from cleanup failures. No verification result publishes a release or grants production/provider access.
 
+### Manual GitHub-hosted prerequisite probe
+
+The separate `Manual verification host probe` workflow is manual-only and restricted to this repository's protected `main`; both the original actor and any rerun initiator must be the owner. It loads only bootstrap commit `74f9000c6b2fb4829642e2758d4848df6cfe70e5`, verifies the supervisor's fixed SHA-256 before importing it, and checks successful push/main CI and all three required jobs for that exact bootstrap. It does not execute PR inputs or change the existing required CI.
+
+```sh
+gh workflow run verification-host-probe.yml --repo junited31/dotunnel --ref main
+```
+
+The fixed Ubuntu 24.04 job captures prerequisite metadata, the controller's cgroup limits, and read-only Docker service limits. It does not pull an image, create a container, install prerequisites, use sudo, or execute packages, providers, live services or releases. The three-minute job uses bounded subprocess waits/output and retains four JSON records for seven days.
+
+`AVAILABLE` means the prerequisite probe completed, not that a kernel pilot passed. The records explicitly retain `kernel_pilot_status=BLOCKED` and unverified independent lifetime enforcement. Controller errors and unavailable prerequisites fail the probe job. A full kernel pilot still requires a separately approved, independently enforced preparation/controller/daemon lifetime and resource boundary; metadata, headroom monitoring, a command timeout or a userspace watchdog alone is not that proof. Installed CLI/SDK and optional live/native scenario acceptance remain separate and unaccepted.
+
 ## Further reading
 
 - [Front page](../README.md) · [한국어 front page](../README.ko.md)
