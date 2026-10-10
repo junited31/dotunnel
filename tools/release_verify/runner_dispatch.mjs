@@ -674,7 +674,6 @@ function strictIsoTimestamp(value) {
 export function comparisonIsAncestor(value, helperCommit, workflowCommit) {
   return isRecord(value) && ['identical', 'ahead'].includes(value.status)
     && isRecord(value.base_commit) && value.base_commit.sha === helperCommit
-    && isRecord(value.head_commit) && value.head_commit.sha === workflowCommit
     && isRecord(value.merge_base_commit) && value.merge_base_commit.sha === helperCommit
     && value.url === `${API_ROOT}/repos/${REPOSITORY}/compare/${helperCommit}...${workflowCommit}`
     && Number.isSafeInteger(value.ahead_by) && value.ahead_by >= 0;
@@ -739,7 +738,7 @@ async function assertAbsent(pathname) {
 
 export function trustedNodeStat(stat) {
   return stat.isFile() && stat.uid === 0n && stat.nlink === 1n
-    && (stat.mode & 0o222n) === 0n && (stat.mode & 0o111n) !== 0n;
+    && (stat.mode & 0o022n) === 0n && (stat.mode & 0o111n) !== 0n;
 }
 
 async function verifyNodeRuntime() {

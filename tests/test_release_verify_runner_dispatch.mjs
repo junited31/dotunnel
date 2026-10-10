@@ -13,6 +13,12 @@ const modulePath = fileURLToPath(new URL('../tools/release_verify/runner_dispatc
 const moduleUrl = pathToFileURL(modulePath).href;
 const SIGINT_MARKER = 'dispatcher-lifetime-after-sigint';
 
+// Keep fixture processes within the same fixed CI address-space limits.
+// Test-runner flags and environment-based Node options are not forwarded.
+const fixtureNodeFlags = process.execArgv.filter((argument) =>
+  argument === '--jitless' || argument === '--disable-wasm-trap-handler'
+    || argument === '--max-old-space-size=64');
+
 function untilLine(child, expected, timeoutMs = 2000) {
   return new Promise((resolve, reject) => {
     let output = '';
@@ -73,7 +79,7 @@ test('actual SIGINT sends one cancellation frame and keeps the dispatcher alive'
     setTimeout(() => process.stdout.write(${JSON.stringify(SIGINT_MARKER)} + '\\n'), 100);
     setInterval(() => {}, 1000);
   `;
-  const child = spawn(process.execPath, ['--input-type=module', '--eval', childSource], {
+  const child = spawn(process.execPath, [...fixtureNodeFlags, '--input-type=module', '--eval', childSource], {
     cwd: directory,
     env: {
       PATH: process.env.PATH ?? '',
@@ -121,7 +127,7 @@ test('SIGTERM never becomes a cancellation notice', async (t) => {
     process.stdout.write('dispatcher-ready\\n');
     setInterval(() => {}, 1000);
   `;
-  const child = spawn(process.execPath, ['--input-type=module', '--eval', childSource], {
+  const child = spawn(process.execPath, [...fixtureNodeFlags, '--input-type=module', '--eval', childSource], {
     cwd: directory,
     env: {
       PATH: process.env.PATH ?? '',
@@ -153,13 +159,15 @@ test('root child credentials remain isolated in an actual subprocess', () => {
       else process.env[key] = value;
     }
   }
-  const result = spawnSync(process.execPath, ['--input-type=module', '--eval', `
+  const result = spawnSync(process.execPath, [...fixtureNodeFlags, '--input-type=module', '--eval', `
     const forbidden = ['GITHUB_TOKEN', 'GH_TOKEN', 'GH_ENTERPRISE_TOKEN', 'ACTIONS_RUNTIME_TOKEN',
       'ACTIONS_RUNTIME_URL', 'ACTIONS_RESULTS_URL', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN', 'ACTIONS_ID_TOKEN_REQUEST_URL',
       'DOTUNNEL_BOOTSTRAP_MANIFEST', 'DOTUNNEL_SOURCE_DEV', 'DOTUNNEL_SOURCE_INO'];
     if (forbidden.some((key) => Object.hasOwn(process.env, key))) process.exitCode = 7;
   `], {
     encoding: 'utf8',
+    timeout: 3000,
+    maxBuffer: 8192,
     env: environment,
   });
   assert.equal(result.status, 0, result.stderr);
@@ -173,10 +181,11 @@ test('an unauthorized invocation fails before changing output or exposing creden
   const outputPath = path.join(directory, 'github-output');
   const original = 'preexisting-output\n';
   await writeFile(outputPath, original, { mode: 0o600 });
-  const result = spawnSync(process.execPath, [modulePath], {
+  const result = spawnSync(process.execPath, [...fixtureNodeFlags, modulePath], {
     cwd: directory,
     encoding: 'utf8',
     timeout: 3000,
+    maxBuffer: 8192,
     env: {
       PATH: process.env.PATH ?? '',
       GITHUB_REPOSITORY: 'foreign/repository',
@@ -198,6 +207,7 @@ test('an unauthorized invocation fails before changing output or exposing creden
       DOTUNNEL_RECEIPT_SCENARIO: 'normal',
     },
   });
+  assert.equal(result.signal, null, 'refusal must be a normal CLI exit, not a runtime abort');
   assert.notEqual(result.status, 0, 'foreign repository metadata is refused');
   assert.equal(await readFile(outputPath, 'utf8'), original);
   assert.ok(!result.stdout.includes('contents-secret-marker'));
@@ -210,35 +220,28 @@ test('status stream rejects an oversized response without buffering it unbounded
   const directory = await mkdtemp(path.join(os.tmpdir(), 'runner-dispatch-stream-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const socketPath = path.join(directory, 'status.sock');
+  const sockets = new Set();
   const server = net.createServer((socket) => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
     socket.once('data', () => {
       socket.write(Buffer.alloc(65 * 1024, 0x61));
     });
   });
   await new Promise((resolve, reject) => server.listen(socketPath, resolve).once('error', reject));
-  t.after(() => new Promise((resolve) => server.close(resolve)));
-
-  const source = `
-    import { requestControlStream } from ${JSON.stringify(moduleUrl)};
-    try {
-      await requestControlStream(process.env.TEST_CONTROL_SOCKET, { op: 'STATUS' }, BigInt(process.env.TEST_OUTER_DEADLINE_NS));
-      process.exitCode = 9;
-    } catch (error) {
-      if (error?.code !== 'status-frame-too-large') process.exitCode = 8;
-    }
-  `;
-  const result = spawnSync(process.execPath, ['--input-type=module', '--eval', source], {
-    encoding: 'utf8',
-    timeout: 3000,
-    env: {
-      PATH: process.env.PATH ?? '',
-      TEST_CONTROL_SOCKET: socketPath,
-      TEST_OUTER_DEADLINE_NS: (process.hrtime.bigint() + 2_000_000_000n).toString(),
-    },
+  t.after(() => {
+    for (const socket of sockets) socket.destroy();
+    return new Promise((resolve) => server.close(resolve));
   });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout, '');
-  assert.equal(result.stderr, '');
+
+  // Keep the server event loop live while the real production decoder reads
+  // the independent socket. A synchronous child blocked the server entirely.
+  await assert.rejects(
+    dispatcher.requestControlStream(
+      socketPath, { op: 'STATUS' }, process.hrtime.bigint() + 2_000_000_000n,
+    ),
+    (error) => error?.code === 'status-frame-too-large',
+  );
 });
 
 test('GitHub comparison without invented head_commit admits only the bound ancestry', () => {
