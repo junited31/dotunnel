@@ -314,7 +314,7 @@ class RunnerAuthorityTests(unittest.TestCase):
             "device": metadata.st_dev, "inode": metadata.st_ino, "nonce": store.nonce,
             "control_group": "", "cgroup_absent": True,
         }
-        self.assertTrue(store.begin_cleanup("normal-exit"))
+        self.assertTrue(store.begin_cleanup())
         for altered in (
             {**idle, "main_pid": os.getpid()}, {**idle, "control_pid": True},
             {**idle, "nonce": ("0" if store.nonce[0] != "0" else "1") + store.nonce[1:]},

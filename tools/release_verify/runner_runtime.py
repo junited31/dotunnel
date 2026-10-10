@@ -1664,7 +1664,7 @@ def _validate_state(state: object, names: runner_policy.RunNames) -> dict[str, A
             "reaper_started_ns", "ready_ns", "cancel_received_ns", "cleanup_started_ns",
             "cleanup_finished_ns", "terminal_ns"}:
         _fail("runtime-state-timestamps")
-    if type(state["deadlines"]) is not dict or set(state["deadlines"]) not in ({}, {"work_ns", "cleanup_ns", "publish_ns", "outer_ns"}):
+    if type(state["deadlines"]) is not dict or set(state["deadlines"]) not in (set(), {"work_ns", "cleanup_ns", "publish_ns", "outer_ns"}):
         _fail("runtime-state-deadlines")
     if type(state["definitions"]) is not dict or type(state["units"]) is not dict:
         _fail("runtime-state-units")

@@ -1608,7 +1608,10 @@ async function requestRootControl(socketPath, request, deadlineNs, names, bindin
 }
 
 export async function openSearchDirectory(directoryPath) {
-  return fs.open(directoryPath, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+  // Linux O_PATH is not exported by Node's fs.constants. It pins the
+  // search-only root directory without requiring directory-read permission.
+  const linuxOPath = 0x200000;
+  return fs.open(directoryPath, linuxOPath | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
 }
 
 function directoryIdentity(stat) {
