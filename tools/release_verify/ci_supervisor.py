@@ -1137,14 +1137,20 @@ def _secure_executable(path: str) -> bool:
         return False
 
 
-def _bwrap_probe() -> dict[str, object]:
+def _bwrap_probe(
+    *, resource_check: Callable[[], None] | None = None,
+) -> dict[str, object]:
     binary = shutil.which("bwrap", path="/usr/bin:/bin")
     metadata: dict[str, object] = {"available": binary is not None, "version": None, "namespace_test": "not-run"}
     if binary is None or not _secure_executable(binary):
         metadata["available"] = False
         metadata["reason"] = "bwrap-missing-or-untrusted"
         return metadata
-    version = _bounded_command([str(Path(binary).resolve()), "--version"], timeout=2, stdout_limit=4096, stderr_limit=4096)
+    version = _bounded_command(
+        [str(Path(binary).resolve()), "--version"],
+        timeout=2, stdout_limit=4096, stderr_limit=4096,
+        resource_check=resource_check,
+    )
     if version.returncode == 0 and not version.timed_out and not version.stdout_truncated:
         metadata["version"] = version.stdout.decode("utf-8", "replace").strip()[:256]
     true_path = "/usr/bin/true"
@@ -1157,12 +1163,22 @@ def _bwrap_probe() -> dict[str, object]:
         "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc",
         "--", true_path,
     ]
-    result = _bounded_command(command, timeout=4, stdout_limit=4096, stderr_limit=4096)
+    result = _bounded_command(
+        command, timeout=4, stdout_limit=4096, stderr_limit=4096,
+        resource_check=resource_check,
+    )
     metadata["namespace_test"] = "available" if result.returncode == 0 and not result.timed_out else "blocked"
     return metadata
 
 
-def probe() -> dict[str, object]:
+def _is_amd64_architecture(value: object) -> bool:
+    return isinstance(value, str) and value.strip().lower() in {"x86_64", "amd64"}
+
+def probe(
+    *,
+    resource_check: Callable[[], None] | None = None,
+    on_docker_root: Callable[[object], None] | None = None,
+) -> dict[str, object]:
     """Read-only Linux/Docker/cgroup/bwrap capability probe; never claims a pilot pass."""
     uid = _effective_uid()
     reasons: list[str] = []
@@ -1185,10 +1201,12 @@ def probe() -> dict[str, object]:
                 version = _docker_command(
                     docker_path, ["version", "--format", "{{json .}}"],
                     timeout=5, stdout_limit=16 * 1024, stderr_limit=4096,
+                    resource_check=resource_check,
                 )
                 info = _docker_command(
                     docker_path, ["info", "--format", "{{json .}}"],
                     timeout=5, stdout_limit=32 * 1024, stderr_limit=4096,
+                    resource_check=resource_check,
                 )
                 version_data = _parse_json_output(version)
                 info_data = _parse_json_output(info)
@@ -1203,6 +1221,12 @@ def probe() -> dict[str, object]:
                     if isinstance(server, dict):
                         docker["server_version"] = server.get("Version")
                 if isinstance(info_data, dict):
+                    if on_docker_root is not None:
+                        on_docker_root(info_data.get("DockerRootDir"))
+                    if resource_check is not None:
+                        resource_check()
+                    if not _is_amd64_architecture(info_data.get("Architecture")):
+                        reasons.append("docker-daemon-amd64-required")
                     docker["server_reachable"] = True
                     for key in (
                         "ServerVersion", "OperatingSystem", "OSType", "Architecture",
@@ -1233,7 +1257,7 @@ def probe() -> dict[str, object]:
         "bwrap": (
             {"available": False, "namespace_test": "not-run-root-refused"}
             if uid == 0
-            else _bwrap_probe()
+            else _bwrap_probe(resource_check=resource_check)
         ),
         "host_resources": _host_resources(
             docker_root=Path(str(docker["dockerrootdir"]))
@@ -1244,8 +1268,11 @@ def probe() -> dict[str, object]:
         "reasons": reasons,
     }
     if metadata["platform"]["system"] != "linux":
-        metadata["status"] = "BLOCKED"
-        metadata["reasons"] = list(metadata["reasons"]) + ["linux-host-required"]
+        reasons.append("linux-host-required")
+    if not _is_amd64_architecture(platform.machine()):
+        reasons.append("linux-amd64-host-required")
+    metadata["status"] = "BLOCKED" if reasons else "AVAILABLE"
+    metadata["reasons"] = reasons
     return metadata
 
 
@@ -1443,7 +1470,11 @@ def _assert_open_private_root(
         raise ValueError("private run directory identity changed")
 
 
-def _open_private_lock(root: Path, name: str) -> int:
+class _PrivateLockTimeout(TimeoutError):
+    """A private advisory lock remained contended past its bounded wait."""
+
+
+def _open_private_lock(root: Path, name: str, *, timeout: float = 1.0) -> int:
     if name not in {".ledger.lock", ".go.lock"}:
         raise ValueError("unknown private lock name")
     directory_fd, root_identity = _open_private_root_dir(root)
@@ -1459,7 +1490,17 @@ def _open_private_lock(root: Path, name: str) -> int:
         identity = _private_metadata_identity(os.fstat(lock_fd))
         if identity[5] != 0 or _private_metadata_at(directory_fd, name) != identity:
             raise ValueError("private lock file identity is unsafe")
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise _PrivateLockTimeout("private lock acquisition timed out")
+                time.sleep(min(0.02, remaining))
+            else:
+                break
         _assert_open_private_root(root, directory_fd, root_identity)
         if _private_metadata_at(directory_fd, name) != identity:
             raise ValueError("private lock file was replaced")
@@ -2041,34 +2082,87 @@ def _watchdog(root: Path, expected_control_digest: str) -> int:
     controller_ticks = int(control["controller_start_ticks"])
     owner_uid = int(control["owner_uid"])
     telemetry_failure_latched: str | None = None
+    controller_alive = False
+    controller_termination_unconfirmed = False
+
+    def stop_expired_controller() -> bool:
+        nonlocal controller_alive, controller_termination_unconfirmed
+        if not _current_process_matches(controller_pid, controller_ticks, owner_uid):
+            controller_alive = False
+            controller_termination_unconfirmed = False
+            return True
+        if time.monotonic_ns() < deadline_ns:
+            return False
+        try:
+            terminated = _kill_verified_process(controller_pid, controller_ticks, owner_uid)
+        except (OSError, ValueError, RuntimeError):
+            terminated = False
+        controller_alive = _current_process_matches(
+            controller_pid, controller_ticks, owner_uid,
+        )
+        controller_termination_unconfirmed = not terminated or controller_alive
+        return not controller_termination_unconfirmed
+
+    def open_watchdog_lock(lock_name: str) -> int:
+        try:
+            return _open_private_lock(root, lock_name, timeout=0.1)
+        except _PrivateLockTimeout:
+            if not stop_expired_controller():
+                raise
+            return _open_private_lock(root, lock_name)
+
+    def write_watchdog_ledger(ledger: dict[str, object]) -> None:
+        try:
+            _ledger_write(root, ledger)
+        except _PrivateLockTimeout:
+            if not stop_expired_controller():
+                raise
+            _ledger_write(root, ledger)
+
+    def record_unresolved(ledger: dict[str, object], reason: str) -> bool:
+        previous_reason = ledger.get("cleanup_reason")
+        ledger["state"] = "watchdog-unresolved"
+        ledger["cleanup_confirmed"] = False
+        ledger["cleanup_reason"] = (
+            previous_reason + ";" + reason
+            if isinstance(previous_reason, str) and previous_reason else reason
+        )
+        ledger["status"] = "BLOCKED"
+        try:
+            write_watchdog_ledger(ledger)
+        except (OSError, ValueError):
+            return False
+        return True
+
     while True:
         ledger = _ledger_read(root)
         if ledger is None or ledger.get("run_id") != run_id or ledger.get("name") != name:
             return 72
+        now_ns = time.monotonic_ns()
+        controller_alive = _current_process_matches(controller_pid, controller_ticks, owner_uid)
+        controller_termination_unconfirmed = False
         if ledger.get("state") == "complete" and ledger.get("cleanup_confirmed") is True:
             try:
-                admission_lock = _open_private_lock(root, ".go.lock")
+                admission_lock = open_watchdog_lock(".go.lock")
             except (OSError, ValueError):
+                if not record_unresolved(ledger, "go-admission-lock-unavailable"):
+                    return 73
                 return 75
             if not _write_private_marker(root, "go.closed", b"closed\n"):
                 # Keep the shared lock held until process exit; no controller
                 # can mistake a failed fence for permission to send GO.
+                if not record_unresolved(ledger, "go-admission-fence-unconfirmed"):
+                    return 73
                 return 75
+            if controller_termination_unconfirmed:
+                _release_private_lock(admission_lock)
+                if not record_unresolved(ledger, "controller-quiescence-unconfirmed"):
+                    return 73
+                return 74
             if ledger.get("attempted") is True and not _watchdog_client_quiesced(
                 ledger, owner_uid,
             ):
-                previous_reason = ledger.get("cleanup_reason")
-                ledger["state"] = "watchdog-unresolved"
-                ledger["cleanup_confirmed"] = False
-                ledger["cleanup_reason"] = (
-                    previous_reason + ";docker-client-quiescence-unconfirmed"
-                    if isinstance(previous_reason, str) and previous_reason
-                    else "docker-client-quiescence-unconfirmed"
-                )
-                ledger["status"] = "BLOCKED"
-                try:
-                    _ledger_write(root, ledger)
-                except (OSError, ValueError):
+                if not record_unresolved(ledger, "docker-client-quiescence-unconfirmed"):
                     return 73
                 _release_private_lock(admission_lock)
                 return 74
@@ -2076,17 +2170,23 @@ def _watchdog(root: Path, expected_control_digest: str) -> int:
             removed = _remove_private_root(
                 root, int(control["root_dev"]), int(control["root_ino"])
             )
-            return 0 if removed or _private_root_absent(root) else 75
-        now_ns = time.monotonic_ns()
-        controller_alive = _current_process_matches(controller_pid, controller_ticks, owner_uid)
+            if removed or _private_root_absent(root):
+                return 0
+            if not record_unresolved(ledger, "private-state-cleanup-unconfirmed"):
+                return 73
+            return 75
         if not controller_alive or now_ns >= deadline_ns:
+            admission_lock: int | None = None
             try:
-                admission_lock = _open_private_lock(root, ".go.lock")
+                admission_lock = open_watchdog_lock(".go.lock")
+            except _PrivateLockTimeout:
+                fence_confirmed = False
             except (OSError, ValueError):
                 return 76
-            fence_confirmed = _write_private_marker(root, "go.closed", b"closed\n")
-            if fence_confirmed:
-                _release_private_lock(admission_lock)
+            else:
+                fence_confirmed = _write_private_marker(root, "go.closed", b"closed\n")
+                if fence_confirmed:
+                    _release_private_lock(admission_lock)
             container_id = ledger.get("container_id")
             if not isinstance(container_id, str) or _CONTAINER_ID_RE.fullmatch(container_id) is None:
                 container_id = None
@@ -2124,7 +2224,7 @@ def _watchdog(root: Path, expected_control_digest: str) -> int:
                             ledger["container_id"] = container_id
                             ledger["state"] = "create-reconciled"
                             try:
-                                _ledger_write(root, ledger)
+                                write_watchdog_ledger(ledger)
                             except (OSError, ValueError):
                                 intermediate_write_failed = True
                 if container_id is None:
@@ -2141,6 +2241,8 @@ def _watchdog(root: Path, expected_control_digest: str) -> int:
                     )
                 resource_check()
             failures: list[str] = []
+            if controller_termination_unconfirmed:
+                failures.append("controller-quiescence-unconfirmed")
             if not client_quiesced:
                 failures.append("docker-client-quiescence-unconfirmed")
             if telemetry_failure is not None:
@@ -2151,18 +2253,21 @@ def _watchdog(root: Path, expected_control_digest: str) -> int:
                 failures.append("cid-reconciliation-ledger-write-failed")
             if failures:
                 reason = ";".join((*failures, reason))
-            confirmed = confirmed and client_quiesced and telemetry_failure is None and fence_confirmed
+            confirmed = (
+                confirmed and client_quiesced and telemetry_failure is None
+                and fence_confirmed and not controller_termination_unconfirmed
+            )
             ledger["state"] = "watchdog-cleaned" if confirmed else "watchdog-unresolved"
             ledger["container_id"] = actual_id
             ledger["cleanup_confirmed"] = confirmed
             ledger["cleanup_reason"] = reason
             ledger["status"] = "BLOCKED"
             try:
-                _ledger_write(root, ledger)
+                write_watchdog_ledger(ledger)
             except (OSError, ValueError):
                 return 73
             if not fence_confirmed:
-                # The lock remains held through this process's exit.
+                # Keep any acquired admission lock held if the fence was not confirmed.
                 return 74
             if not controller_alive and confirmed:
                 root_info = os.stat(root, follow_symlinks=False)
@@ -2171,6 +2276,7 @@ def _watchdog(root: Path, expected_control_digest: str) -> int:
             if now_ns >= deadline_ns:
                 return 0 if confirmed else 74
         time.sleep(0.2)
+
 
 
 def _watchdog_start(
@@ -2632,6 +2738,7 @@ def _run_pilot(spec: _Spec, policy: Policy) -> dict[str, object]:
     home: Path | None = None
     host_probe: dict[str, object] = {}
     docker_root_path: Path | None = None
+    docker_root_discovered = False
     initial_resources: dict[str, int | None] = {}
     final_resources: dict[str, int | None] = {}
     min_memory: int | None = None
@@ -2691,15 +2798,38 @@ def _run_pilot(spec: _Spec, policy: Policy) -> dict[str, object]:
             resource_failure = failure
         return failure
 
-    def check_resources() -> None:
+    def check_resources(
+        *, initial: bool = False, allow_missing_docker_root: bool = False,
+    ) -> None:
         nonlocal reason, status
-        sample_resources()
+        sample_resources(
+            initial=initial, allow_missing_docker_root=allow_missing_docker_root,
+        )
         failure = resource_failure
         if failure is not None:
             if status == "PASS" or reason in {"trusted-preflight-failed", "pilot-not-completed"}:
                 reason = failure
             status = "FAIL" if ledger is not None and ledger.get("attempted") is True else "BLOCKED"
             raise RuntimeError("host resource accounting or headroom is unavailable")
+
+    def probe_resource_check() -> None:
+        check_resources(
+            initial=True,
+            allow_missing_docker_root=not docker_root_discovered,
+        )
+
+    def record_docker_root(value: object) -> None:
+        nonlocal docker_root_path, docker_root_discovered
+        docker_root_discovered = True
+        docker_root_path = None
+        if not isinstance(value, str) or not Path(value).is_absolute():
+            return
+        try:
+            resolved = Path(value).resolve(strict=True)
+            if resolved.is_dir():
+                docker_root_path = resolved
+        except (OSError, RuntimeError, ValueError):
+            pass
 
     def cleanup_resources() -> None:
         nonlocal reason, status, resource_failure, cleanup_resource_failure
@@ -2760,21 +2890,19 @@ def _run_pilot(spec: _Spec, policy: Policy) -> dict[str, object]:
         docker, docker_reason = _docker_binary()
         if docker is None:
             return {"schema": 1, "status": "BLOCKED", "reason": docker_reason or "docker-client-unavailable", "cleanup_confirmed": True}
-        host_probe = probe()
+        host_probe = probe(
+            resource_check=probe_resource_check,
+            on_docker_root=record_docker_root,
+        )
         if host_probe.get("status") != "AVAILABLE":
             return {"schema": 1, "status": "BLOCKED", "reason": "host-prerequisite-probe-blocked", "probe": host_probe, "cleanup_confirmed": True}
-        docker_root_value = (
-            host_probe.get("docker", {}).get("dockerrootdir")
-            if isinstance(host_probe.get("docker"), dict)
-            else None
-        )
-        if isinstance(docker_root_value, str) and Path(docker_root_value).is_absolute():
-            try:
-                resolved_docker_root = Path(docker_root_value).resolve(strict=True)
-                if resolved_docker_root.is_dir():
-                    docker_root_path = resolved_docker_root
-            except (OSError, RuntimeError):
-                pass
+        if not docker_root_discovered:
+            docker_root_value = (
+                host_probe.get("docker", {}).get("dockerrootdir")
+                if isinstance(host_probe.get("docker"), dict)
+                else None
+            )
+            record_docker_root(docker_root_value)
         resource_reason = sample_resources(initial=True)
         initial_resources = final_resources.copy()
         if resource_reason is not None:
