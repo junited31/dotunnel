@@ -51,6 +51,27 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+      - name: Reproduce reviewed official SDK protocol and transient-output-FD failures
+        shell: bash
+        run: |
+          set -euo pipefail
+          cpu=$(python -c 'import os; print(min(os.sched_getaffinity(0)))')
+          log=$(mktemp "$RUNNER_TEMP/receipt-sdk-baseline.XXXXXX")
+          if (
+            ulimit -f 64
+            ulimit -c 0
+            /usr/bin/time -v timeout --signal=TERM --kill-after=2s 30s \
+              taskset --cpu-list "$cpu" \
+              prlimit --as=805306368 --nproc=64 --nofile=256 --cpu=20 -- \
+              env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$GITHUB_WORKSPACE:$GITHUB_WORKSPACE/tests" \
+              python -B tests/sdk_baseline_probe.py
+          ) >"$log" 2>&1; then status=0; else status=$?; fi
+          cat "$log"
+          rm -- "$log"
+          exit "$status"
       - name: Pilot actual command capture and manager durations without privilege
         shell: bash
         run: |
@@ -89,10 +110,6 @@ jobs:
           cat "$log"
           rm -- "$log"
           exit "$status"
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        if: matrix.python == '3.11'
-        with:
-          node-version: '24'
       - name: Pilot and exercise real Node receipt entry
         if: matrix.python == '3.11'
         shell: bash
