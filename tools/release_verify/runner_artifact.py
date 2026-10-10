@@ -1435,12 +1435,19 @@ class BoundedTLSGuard:
             client_channel = _Wire(current_client, self.deadline_ns)
 
             while not self._stop.is_set():
+                # Idle TLS and keep-alive connections must not reserve the
+                # shared authenticated exchange. Read one bounded request
+                # before serializing policy state and its upstream response.
+                try:
+                    method, target, _version, headers, body = _read_request(client_channel)
+                except Exception:
+                    self._send_tls_rejection(client_channel)
+                    return
                 remaining = self._remaining()
                 acquired = self.policy._exchange_lock.acquire(timeout=remaining)
                 if not acquired:
                     _deny()
                 try:
-                    method, target, _version, headers, body = _read_request(client_channel)
                     request_url = "https://" + host + target
                     self.policy.validate_request(method, request_url, headers.pairs, body)
                     pending = self.policy._pending
