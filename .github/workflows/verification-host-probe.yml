@@ -117,6 +117,11 @@ jobs:
                   stream.write(data)
               print(name + ': ' + str(value.get('status', 'RECORDED')))
 
+          def _host_probe_identity_reason(status):
+              if status == 'AVAILABLE':
+                  return 'host-prerequisites-available;kernel-pilot-remains-blocked'
+              return 'host-prerequisites-or-start-headroom-unavailable;kernel-pilot-remains-blocked'
+
           identity = {
               'schema': 1, 'status': 'BLOCKED', 'bootstrap_sha': bootstrap,
               'workflow_sha': os.environ['GITHUB_SHA'], 'supervisor_sha256': source_sha,
@@ -274,9 +279,7 @@ jobs:
                   'independent_lifetime_verified': False,
               })
               identity['status'] = probe['status']
-              identity['reason'] = (
-                  'host-prerequisites-or-start-headroom-unavailable;kernel-pilot-remains-blocked'
-              )
+              identity['reason'] = _host_probe_identity_reason(identity['status'])
               if identity['status'] != 'AVAILABLE':
                   raise SystemExit(2)
           except Exception as error:
