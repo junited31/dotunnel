@@ -412,7 +412,7 @@ Run only reviewed, trusted supervisor bytes. Candidate input cannot supply a com
 python3 -I tools/release_verify/ci_supervisor.py probe
 ```
 
-The finite `pilot` command accepts only `--stage capabilities` or `--stage hostile-pilot`, an exclusive 32-character lowercase hexadecimal `--run-id`, and an optional immutable `--input-root`. Use a dedicated, authorized non-root Linux Docker host. Missing Docker, accounting, ownership or enforcement returns `BLOCKED`; do not install or relax prerequisites automatically.
+The finite `pilot` command accepts only `--stage capabilities` or `--stage hostile-pilot`, an exclusive 32-character lowercase hexadecimal `--run-id`, and an optional immutable `--input-root`. Use a dedicated, authorized non-root Linux/amd64 Docker host. The trusted image policy does not admit arm64; it returns `BLOCKED` rather than selecting an unreviewed image. Missing Docker, accounting, ownership or enforcement returns `BLOCKED`; do not install or relax prerequisites automatically.
 
 The trusted container policy fixes RAM at 512MiB, swap at zero, CPU at 50%, processes at 64, wall time at 180 seconds, writable scratch at 256MiB, stdout/stderr at 64KiB each, and the stop grace period at two seconds. Host admission additionally requires 8GiB available memory and 4GiB free disk on both the control and Docker-root filesystems. Execution stops on missing telemetry or below 6GiB memory / 2GiB disk; limits are not raised mid-run.
 

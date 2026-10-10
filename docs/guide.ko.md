@@ -401,7 +401,7 @@ gh workflow run release.yml --ref main -f dry_run=true
 python3 -I tools/release_verify/ci_supervisor.py probe
 ```
 
-유한 `pilot` 명령은 `--stage capabilities` 또는 `--stage hostile-pilot`, 독점적인 소문자 16진수 32자리 `--run-id`, 선택적인 불변 `--input-root`만 받습니다. 승인된 전용 non-root Linux Docker host를 사용하세요. Docker·계측·소유권·제한 강제가 없으면 `BLOCKED`이며 전제 조건을 자동 설치하거나 완화하지 않습니다.
+유한 `pilot` 명령은 `--stage capabilities` 또는 `--stage hostile-pilot`, 독점적인 소문자 16진수 32자리 `--run-id`, 선택적인 불변 `--input-root`만 받습니다. 승인된 전용 non-root Linux/amd64 Docker host를 사용하세요. 신뢰 이미지 정책은 arm64를 허용하지 않으며, 검토되지 않은 이미지를 선택하지 않고 `BLOCKED`로 끝납니다. Docker·계측·소유권·제한 강제가 없으면 `BLOCKED`이며 전제 조건을 자동 설치하거나 완화하지 않습니다.
 
 신뢰 정책은 container RAM 512MiB·swap 0·CPU 50%·process 64개·wall 180초·쓰기 scratch 256MiB·stdout/stderr 각각 64KiB·종료 유예 2초를 고정합니다. 시작 시 여유 메모리 8GiB와 control·Docker-root 파일시스템 각각 여유 디스크 4GiB가 추가로 필요합니다. 실행 중 계측이 없거나 메모리 6GiB / 디스크 2GiB 미만이면 중단하며 제한을 높이지 않습니다.
 
