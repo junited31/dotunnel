@@ -4,6 +4,8 @@ import importlib.util
 import io
 import json
 import os
+import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -122,32 +124,46 @@ class ReleaseVerifyCIWatchdogTests(unittest.TestCase):
         return docker, log_path
 
     def _run_watchdog(self, root, docker, ledger, *, fail_reconciliation=False,
-                      client_kill=True, client_alive=False):
+                      client_kill=True, client_alive=False, controller_identity=None,
+                      controller_kill=True, ledger_already_written=False):
         api = self.api
         root = Path(root)
         root_info = os.lstat(root)
+        if not ledger_already_written:
+            api._ledger_write(root, ledger)
+        original_write = api._ledger_write
+        original_process_matches = api._current_process_matches
+        original_kill = api._kill_verified_process
+        controller_pid, controller_ticks = (
+            controller_identity if controller_identity is not None else (98765432, 8765)
+        )
         control = {
             "docker_path": str(docker),
             "docker_root_path": str(Path("/tmp").resolve(strict=True)),
             "run_id": _RUN_ID,
             "name": _OWNED_NAME,
             "deadline_ns": time.monotonic_ns() - 1,
-            "controller_pid": 98765432,
-            "controller_start_ticks": 8765,
+            "controller_pid": controller_pid,
+            "controller_start_ticks": controller_ticks,
             "owner_uid": os.getuid(),
             "root_dev": root_info.st_dev,
             "root_ino": root_info.st_ino,
         }
-        api._ledger_write(root, ledger)
-        original_write = api._ledger_write
 
         def maybe_fail_reconciliation(write_root, value):
             if fail_reconciliation and value.get("state") == "create-reconciled":
                 raise OSError("injected interrupted reconciliation write")
             original_write(write_root, value)
 
-        def process_matches(pid, _ticks, _uid):
+        def process_matches(pid, ticks, uid):
+            if controller_identity is not None and pid == controller_pid:
+                return original_process_matches(pid, ticks, uid)
             return client_alive and pid == ledger["docker_pid"]
+
+        def kill_verified(pid, ticks, uid):
+            if controller_identity is not None and pid == controller_pid:
+                return controller_kill and original_kill(pid, ticks, uid)
+            return client_kill
 
         with ExitStack() as stack:
             for name, value in (
@@ -155,7 +171,7 @@ class ReleaseVerifyCIWatchdogTests(unittest.TestCase):
                 ("_source_matches", True),
                 ("_secure_executable", True),
                 ("_current_process_matches", process_matches),
-                ("_kill_verified_process", client_kill),
+                ("_kill_verified_process", kill_verified),
                 ("_host_resources", {
                     "memory_available_bytes": 64 * 1024**3,
                     "disk_free_bytes": 64 * 1024**3,
@@ -163,13 +179,73 @@ class ReleaseVerifyCIWatchdogTests(unittest.TestCase):
                 }),
                 ("_ledger_write", maybe_fail_reconciliation if fail_reconciliation else original_write),
             ):
-                if name in {"_current_process_matches", "_ledger_write"}:
+                if name in {
+                    "_current_process_matches", "_kill_verified_process", "_ledger_write",
+                }:
                     stack.enter_context(patch.object(api, name, side_effect=value))
                 else:
                     stack.enter_context(patch.object(api, name, return_value=value))
             stack.enter_context(redirect_stdout(io.StringIO()))
             exit_status = api._watchdog(root, "f" * 64)
         return exit_status
+
+    @staticmethod
+    def _stop_process_group(process):
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=2)
+
+    def _start_lock_holder(self, root, lock_name):
+        lock_path = Path(root) / lock_name
+        if not lock_path.exists():
+            lock_fd = self.api._open_private_lock(root, lock_name)
+            self.api._release_private_lock(lock_fd)
+        ready_path = self.fixture_root / f"{Path(root).name}-{lock_name[1:-5]}-ready"
+        worker = (
+            "import fcntl,os,pathlib,sys,time\n"
+            "fd=os.open(sys.argv[1],os.O_RDWR)\n"
+            "fcntl.flock(fd,fcntl.LOCK_EX)\n"
+            "pathlib.Path(sys.argv[2]).write_text(str(os.getpid()),encoding='ascii')\n"
+            "while True: time.sleep(3600)\n"
+        )
+        manager = (
+            "import subprocess,sys\n"
+            f"worker={worker!r}\n"
+            "child=subprocess.Popen([sys.executable,'-I','-c',worker,sys.argv[1],sys.argv[2]])\n"
+            "child.wait()\n"
+        )
+        process = subprocess.Popen(
+            [sys.executable, "-I", "-c", manager, str(lock_path), str(ready_path)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        self.addCleanup(self._stop_process_group, process)
+        ready_deadline = time.monotonic() + 5
+        while not ready_path.exists() and process.poll() is None and time.monotonic() < ready_deadline:
+            time.sleep(0.01)
+        self.assertTrue(ready_path.exists(), "controller did not acquire the private lock")
+        controller_pid = int(ready_path.read_text(encoding="ascii"))
+        controller_ticks = self.api._current_start_ticks(controller_pid)
+        self.assertIsNotNone(controller_ticks, "lock holder has no readable process birth identity")
+        return process, (controller_pid, controller_ticks)
+
+    def _start_foreign_process(self):
+        process = subprocess.Popen(
+            [sys.executable, "-I", "-c", "import time; time.sleep(60)"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        self.addCleanup(self._stop_process_group, process)
+        start_ticks = self.api._current_start_ticks(process.pid)
+        self.assertIsNotNone(start_ticks, "foreign sentinel has no readable process birth identity")
+        return process, start_ticks
+
 
     def _new_root(self, name):
         root = self.fixture_root / name
@@ -369,6 +445,134 @@ class ReleaseVerifyCIWatchdogTests(unittest.TestCase):
             release_fence.set()
             self._close_session(session)
 
+
+    def _assert_watchdog_recovers_lock_holder(self, lock_name):
+        root = self._new_root("held-" + lock_name[1:-5])
+        docker, log_path = self._owned_docker(self.fixture_root)
+        ledger = self._started_ledger()
+        self.api._ledger_write(root, ledger)
+        controller_manager, controller_identity = self._start_lock_holder(root, lock_name)
+        foreign, foreign_ticks = self._start_foreign_process()
+        session, marker = self._start_go_consumer(self.fixture_root)
+        watchdog_status = []
+        watchdog_errors = []
+
+        def run_watchdog():
+            try:
+                watchdog_status.append(self._run_watchdog(
+                    root, docker, ledger, controller_identity=controller_identity,
+                    ledger_already_written=True,
+                ))
+            except Exception as exc:
+                watchdog_errors.append(exc)
+
+        watchdog_thread = threading.Thread(target=run_watchdog, daemon=True)
+        started = time.monotonic()
+        try:
+            watchdog_thread.start()
+            watchdog_thread.join(timeout=4)
+            completed_within_bound = not watchdog_thread.is_alive()
+            elapsed = time.monotonic() - started
+            if not completed_within_bound:
+                self._stop_process_group(controller_manager)
+                watchdog_thread.join(timeout=5)
+            self.assertTrue(
+                completed_within_bound,
+                f"watchdog blocked on {lock_name} beyond the bounded recovery interval",
+            )
+            self.assertLess(elapsed, 4)
+            self.assertFalse(watchdog_thread.is_alive())
+            self.assertEqual(watchdog_errors, [])
+            self.assertEqual(watchdog_status, [0])
+            self.assertFalse(
+                self.api._current_process_matches(
+                    controller_identity[0], controller_identity[1], os.getuid(),
+                ),
+                "watchdog must terminate the exact controller holding the expired lock",
+            )
+            self.assertTrue(
+                self.api._current_process_matches(foreign.pid, foreign_ticks, os.getuid()),
+                "lock recovery must not terminate a foreign process",
+            )
+            self.assertIsNone(foreign.poll())
+            self.assertEqual(log_path.read_text(encoding="utf-8").splitlines(), ["stop", "rm"])
+            self.assertFalse(json.loads(
+                (self.fixture_root / "docker-state.json").read_text(encoding="utf-8"),
+            )["exists"])
+            failure = self.api._admit_and_send_go(
+                root, session, type("LiveWatchdog", (), {"poll": lambda self: None})(),
+                time.monotonic_ns() + 5_000_000_000,
+            )
+            self.assertIsNotNone(failure)
+            self.assertFalse(marker.exists(), "watchdog recovery must fence all GO submission")
+        finally:
+            if watchdog_thread.is_alive():
+                self._stop_process_group(controller_manager)
+                watchdog_thread.join(timeout=5)
+            self._close_session(session)
+
+    def test_watchdog_recovers_when_expired_controller_holds_go_lock(self):
+        self._assert_watchdog_recovers_lock_holder(".go.lock")
+
+    def test_watchdog_recovers_when_expired_controller_holds_ledger_lock(self):
+        self._assert_watchdog_recovers_lock_holder(".ledger.lock")
+
+    def test_watchdog_lock_recovery_failure_remains_unresolved(self):
+        root = self._new_root("lock-recovery-failure")
+        docker, log_path = self._owned_docker(self.fixture_root)
+        ledger = self._started_ledger()
+        self.api._ledger_write(root, ledger)
+        controller_manager, controller_identity = self._start_lock_holder(root, ".go.lock")
+        session, marker = self._start_go_consumer(self.fixture_root)
+        watchdog_status = []
+        watchdog_errors = []
+
+        def run_watchdog():
+            try:
+                watchdog_status.append(self._run_watchdog(
+                    root, docker, ledger, controller_identity=controller_identity,
+                    controller_kill=False, ledger_already_written=True,
+                ))
+            except Exception as exc:
+                watchdog_errors.append(exc)
+
+        watchdog_thread = threading.Thread(target=run_watchdog, daemon=True)
+        started = time.monotonic()
+        try:
+            watchdog_thread.start()
+            watchdog_thread.join(timeout=4)
+            completed_within_bound = not watchdog_thread.is_alive()
+            elapsed = time.monotonic() - started
+            if not completed_within_bound:
+                self._stop_process_group(controller_manager)
+                watchdog_thread.join(timeout=5)
+            self.assertTrue(
+                completed_within_bound,
+                "watchdog must not wait indefinitely when verified controller termination fails",
+            )
+            self.assertLess(elapsed, 4)
+            self.assertFalse(watchdog_thread.is_alive())
+            self.assertEqual(watchdog_errors, [])
+            self.assertEqual(len(watchdog_status), 1)
+            self.assertNotEqual(watchdog_status[0], 0)
+            self.assertTrue(
+                self.api._current_process_matches(
+                    controller_identity[0], controller_identity[1], os.getuid(),
+                ),
+                "a failed verified termination must leave the controller untouched",
+            )
+            unresolved = self.api._ledger_read(root)
+            self.assertIsNotNone(unresolved)
+            self.assertEqual(unresolved["state"], "watchdog-unresolved")
+            self.assertFalse(unresolved["cleanup_confirmed"])
+            self.assertTrue(unresolved["cleanup_reason"])
+            self.assertEqual(log_path.read_text(encoding="utf-8").splitlines(), ["stop", "rm"])
+            self.assertFalse(marker.exists(), "unresolved lock recovery must never submit GO")
+        finally:
+            if watchdog_thread.is_alive():
+                self._stop_process_group(controller_manager)
+                watchdog_thread.join(timeout=5)
+            self._close_session(session)
 
     def test_control_reader_requires_canonical_docker_root_path(self):
         root = self._new_root("control-docker-root")
