@@ -407,6 +407,10 @@ python3 -I tools/release_verify/ci_supervisor.py probe
 
 검토한 입력은 제한된 SHA-256 tree manifest로 확인하며 create/start/GO 전과 정리 후 다시 검증합니다. read-only mount만으로 host 파일의 불변성이 증명되지는 않습니다. Docker 명령·준비 대기 중에도 자원을 감시합니다. 일시적인 계측 실패는 복구되어도 실패로 유지하며, 정확히 소유한 자원의 정리는 계속 수행합니다.
 
+전제 조건을 확인하는 Docker version/info와 bubblewrap subprocess도 감시합니다. Docker-root 경로를 발견하기 전에는 host 메모리와 control 파일시스템을 감시하고, 발견한 뒤에는 세 계측값을 모두 요구합니다. 실제 host와 Docker daemon 모두 `amd64` 또는 `x86_64`여야 하며, cached image 메타데이터만으로 허용하지 않습니다.
+
+비공개 GO·ledger lock 획득에는 유한 대기 제한이 있습니다. 절대 deadline 이후 독립 watchdog은 기록된 controller의 PID·생성 식별자가 일치하는 경우에만 종료하고 경합 lock 획득을 재시도할 수 있습니다. 종료·fence·정리를 확인하지 못하면 unresolved로 남으며 성공으로 보고하지 않습니다.
+
 파일럿 성공에는 실제 kernel 제한의 독립 확인과 정확히 소유한 container·process tree·비공개 control 디렉터리의 정리 증거가 필요합니다. 단위 테스트·전제 조건 probe는 Docker/bubblewrap 격리, 설치 CLI, SDK, 실제 ChatGPT 또는 native agent 성공을 증명하지 않습니다. 보고서는 원래 실패와 정리 실패를 별도로 보존합니다. 검증 결과가 릴리스를 공개하거나 운영·provider 권한을 부여하지 않습니다.
 
 ## 추가 참고

@@ -5,6 +5,7 @@
 - Add a standalone maintainer-only Linux verification supervisor with fixed Docker pilot limits, bounded SHA-256 input-tree admission rechecked across execution, independently inspected kernel controls, bounded output and ownership-checked cleanup. Monitor host resources through subprocess/readiness waits; missing telemetry or insufficient memory/disk headroom blocks execution and stays failed after transient recovery. Preserve original failures separately while owned cleanup continues.
 - Document the supervisor and the limits of prerequisite/unit-test evidence in both guides. Existing push/PR workflows, required checks, package version, installer pins, release publication and runtime permissions are unchanged.
 - Separate the latched admission/execution telemetry failure from current cleanup samples, retaining the original cause without inventing a cleanup failure after recovery. Document the reviewed Linux/amd64-only image prerequisite.
+- Bound watchdog GO/ledger lock acquisition and recover deadline-expired controller lock ownership through the existing verified PID/birth termination path, preserving unresolved outcomes. Sample prerequisite Docker/bubblewrap waits, require actual host and daemon amd64 architecture, reject truncated create stderr, and leave the execution cause absent for cleanup-only failures.
 
 ## 0.1.6 (2026-10-09)
 

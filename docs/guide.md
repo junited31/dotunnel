@@ -418,6 +418,10 @@ The trusted container policy fixes RAM at 512MiB, swap at zero, CPU at 50%, proc
 
 Reviewed input admission includes a bounded SHA-256 tree manifest, rechecked before create/start/GO and after cleanup; a read-only mount alone does not prove unchanged host bytes. Runtime telemetry is checked during Docker command and readiness waits. A transient telemetry failure stays failed even if accounting recovers; exact owned cleanup still runs.
 
+Prerequisite Docker version/info and bubblewrap subprocesses are sampled too. Before Docker-root discovery, monitor host memory and the control filesystem; after discovery, require all three counters. Both the actual host and Docker daemon must report `amd64` or `x86_64`; cached image metadata alone is insufficient.
+
+Private GO and ledger locks have bounded acquisition. After the absolute deadline, the independent watchdog may terminate only the recorded controller PID/birth identity before retrying a contended lock. Unconfirmed termination, fencing, or cleanup remains unresolved, never successful.
+
 A successful feasibility pilot requires independently inspected effective kernel limits and confirmed cleanup of its exact owned container, process tree and private control directory. Unit tests and a prerequisite probe do not establish Docker/bubblewrap confinement, installed CLI, SDK, live ChatGPT or native-agent success. Reports preserve the original failure separately from cleanup failures. No verification result publishes a release or grants production/provider access.
 
 ## Further reading
