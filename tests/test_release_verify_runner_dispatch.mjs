@@ -70,7 +70,7 @@ test('actual SIGINT sends one cancellation frame and keeps the dispatcher alive'
     requests += 1;
     receiveOneLine(socket).then((line) => {
       notice = JSON.parse(line);
-      socket.end('{"cancel_ack":true}\n');
+      socket.end(`${JSON.stringify({ tag: 'CANCEL_ACK', cancel_ack: true, cancel_notice_ns: notice.notice_ns, cancel_received_ns: notice.notice_ns })}\n`);
     }, (error) => socket.destroy(error));
   });
   await new Promise((resolve, reject) => server.listen(socketPath, resolve).once('error', reject));
@@ -310,4 +310,28 @@ test('terminal record remains readable through a search-only directory descripto
     await chmod(directory, 0o700);
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test('actual SIGINT rejects an ACK timestamp outside its original delivery window', () => {
+  const childSource = `
+    import { installCancellationHandler } from ${JSON.stringify(moduleUrl)};
+    const cancellation = installCancellationHandler(
+      '/unused-synthetic-control', process.hrtime.bigint() + 3_000_000_000n,
+      async (_path, request) => ({
+        tag: 'CANCEL_ACK', cancel_ack: true, cancel_notice_ns: request.notice_ns,
+        cancel_received_ns: (BigInt(request.notice_ns) + 1_000_000_001n).toString(),
+      }),
+    );
+    const signalled = new Promise((resolve) => process.once('SIGINT', resolve));
+    process.kill(process.pid, 'SIGINT');
+    await signalled;
+    const accepted = await cancellation.cancelPromise;
+    cancellation.close();
+    process.stdout.write(JSON.stringify({ accepted }) + '\\n');
+  `;
+  const child = spawnSync(process.execPath, [...fixtureNodeFlags, '--input-type=module', '--eval', childSource], {
+    env: { PATH: process.env.PATH ?? '' }, encoding: 'utf8', timeout: 2000, maxBuffer: 4096,
+  });
+  assert.equal(child.status, 0, child.stderr);
+  assert.deepEqual(JSON.parse(child.stdout), { accepted: false });
 });

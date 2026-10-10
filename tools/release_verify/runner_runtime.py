@@ -69,6 +69,11 @@ _MAX_CTRL_REQUEST = 4 * 1024
 _MAX_CTRL_REPLY = 64 * 1024
 _HARMLESS_CODE = "import os,time;\nif os.read(0,3)!=b'GO\\n': raise SystemExit(71)\ntime.sleep(20)"
 _NS = 1_000_000_000
+_SYSTEMD_TIME_UNITS_US = {
+    "us": 1, "ms": 1_000, "s": 1_000_000, "min": 60_000_000,
+    "h": 3_600_000_000, "d": 86_400_000_000, "w": 604_800_000_000,
+    "month": 2_629_800_000_000, "y": 31_557_600_000_000,
+}
 
 _STATE_FIELDS = frozenset({
     "schema", "boot_id", "nonce", "context", "source", "source_directory", "scenario",
@@ -896,6 +901,9 @@ def _bounded_command(argv: list[str], deadline_ns: int, *, allowed: set[str],
     overflow = False
     timed_out = False
     try:
+        for fd in streams:
+            os.set_blocking(fd, False)
+            selector.register(fd, selectors.EVENT_READ)
         while selector.get_map() or process.poll() is None:
             remain = deadline_ns - time.monotonic_ns()
             if remain <= 0:
@@ -935,6 +943,12 @@ def _bounded_command(argv: list[str], deadline_ns: int, *, allowed: set[str],
         for stream in streams.values():
             if not stream.closed:
                 stream.close()
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=1.0)
     if timed_out:
         _fail("fixed-command-timeout")
     if overflow:
@@ -1248,13 +1262,30 @@ def _verify_no_preexisting_units(names: runner_policy.RunNames, deadline_ns: int
 
 
 def _manager_duration(value: str, code: str) -> int:
-    if re.fullmatch(r"[0-9]+(?:us|ms|s|min)", value) is None:
+    # systemctl displays additive unit components, not necessarily one token.
+    if type(value) is not str or not value or len(value) > 256:
         _fail(code)
-    amount_text = re.match(r"[0-9]+", value)
-    assert amount_text is not None
-    amount = int(amount_text.group(0))
-    unit = value[len(amount_text.group(0)) :]
-    return amount * {"us": 1, "ms": 1000, "s": 1_000_000, "min": 60_000_000}[unit]
+    total = 0
+    for component in value.split(" "):
+        match = re.fullmatch(
+            r"([0-9]{1,20})(?:\.([0-9]{1,6}))?(us|ms|s|min|h|d|w|month|y)",
+            component,
+        )
+        if match is None:
+            _fail(code)
+        whole, fraction, unit = match.groups()
+        multiplier = _SYSTEMD_TIME_UNITS_US[unit]
+        part = int(whole) * multiplier
+        if fraction is not None:
+            fractional, remainder = divmod(int(fraction) * multiplier, 10 ** len(fraction))
+            if remainder:
+                _fail(code)
+            part += fractional
+        total += part
+        # UINT64_MAX denotes infinity in the manager's usec_t contract.
+        if total >= (1 << 64) - 1:
+            _fail(code)
+    return total
 
 
 def _manager_values(properties: dict[str, str]) -> dict[str, object]:
@@ -1289,6 +1320,8 @@ def _open_cgroup(control_group: str) -> tuple[int, os.stat_result]:
     if (type(control_group) is not str or not control_group.startswith("/")
             or ".." in control_group.split("/") or "\x00" in control_group):
         _fail("cgroup-path-invalid")
+    fd = -1
+    returned = False
     try:
         fd = os.open(_CGROUP_DIR, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
         for component in control_group.split("/"):
@@ -1299,13 +1332,16 @@ def _open_cgroup(control_group: str) -> tuple[int, os.stat_result]:
             fd = next_fd
         info = os.fstat(fd)
         if not stat.S_ISDIR(info.st_mode):
-            os.close(fd)
             _fail("cgroup-not-directory")
+        returned = True
         return fd, info
     except FileNotFoundError:
         _fail("cgroup-removed")
     except OSError:
         _fail("cgroup-unavailable")
+    finally:
+        if fd >= 0 and not returned:
+            os.close(fd)
 
 
 def _cgroup_read(fd: int, name: str, maximum: int = 64 * 1024) -> bytes:
@@ -1513,6 +1549,52 @@ def _require_process_in_unit_cgroup(process: ProcessIdentity, manager_path: str,
         _fail("unit-process-cgroup-identity")
 
 
+def _owned_stopped_cgroup(names: runner_policy.RunNames, role: str,
+                          properties: dict[str, str],
+                          state: dict[str, Any]) -> dict[str, object]:
+    """Prove the recorded generation's absence/emptiness, not an empty manager path."""
+    unit = _unit_name(names, role)
+    expected = state["units"].get(role)
+    if (type(expected) is not dict
+            or type(expected.get("invocation_id")) is not str
+            or re.fullmatch(r"[0-9a-f]{32}", expected["invocation_id"]) is None):
+        _fail("unit-stopped-generation-unavailable")
+    slice_name = names.work_slice if role == "harmless" else _slice_name(names, role)
+    canonical = f"/{slice_name}/{unit}"
+    recorded = expected.get("cgroup")
+    if (expected.get("unit") != unit or expected.get("control_group") != canonical
+            or type(recorded) is not dict or recorded.get("control_group") != canonical):
+        _fail("unit-stopped-cgroup-record-mismatch")
+    if properties["LoadState"] == "not-found":
+        _unit_absence(unit, properties)
+    elif (properties["LoadState"] != "loaded" or properties["Id"] != unit
+            or properties["InvocationID"] != expected["invocation_id"]
+            or properties["ControlGroup"] not in {"", canonical}
+            or properties["ActiveState"] not in {"inactive", "failed"}
+            or _parse_unsigned(properties["MainPID"], "unit-stopped-main-pid") != 0
+            or _parse_unsigned(properties["ControlPID"], "unit-stopped-control-pid") != 0):
+        _fail("unit-stopped-manager-generation-mismatch")
+    pids = list(recorded.get("pids", []))
+    process = expected.get("process")
+    if type(process) is dict:
+        pids.append({"pid": process["pid"], "birth": process["birth"]})
+    if any(not _pid_birth_gone(row) for row in pids):
+        _fail("unit-stopped-recorded-process-live")
+    budget = ("aggregate" if role == "work" else "harmless" if role == "harmless"
+              else "publisher" if role.startswith("publisher") else role)
+    try:
+        actual = _cgroup_snapshot(canonical, runner_policy.BUDGETS[budget], require_populated=False)
+    except RuntimeFailure as error:
+        if error.code != "cgroup-removed":
+            raise
+        return {"control_group": canonical, "present": False, "observed_absent": True,
+                "populated": False, "pids": []}
+    if (recorded.get("present") is not True
+            or (actual["device"], actual["inode"]) != (recorded.get("device"), recorded.get("inode"))):
+        _fail("unit-stopped-cgroup-generation-mismatch")
+    return actual
+
+
 def _observe_unit(names: runner_policy.RunNames, role: str, deadline_ns: int,
                   *, expected_definition: dict[str, object] | None = None,
                   active: bool = True) -> dict[str, object]:
@@ -1526,6 +1608,10 @@ def _observe_unit(names: runner_policy.RunNames, role: str, deadline_ns: int,
     if type(invocation) is not str or re.fullmatch(r"[0-9a-f]{32}", invocation) is None:
         _fail("systemd-invocation-id-unavailable")
     state = _load_state_from_names(names)
+    previous = state["units"].get(role)
+    if (type(previous) is dict and previous.get("invocation_id") is not None
+            and previous["invocation_id"] != invocation):
+        _fail("unit-invocation-generation-mismatch")
     definition = expected_definition
     if definition is None:
         definition = state["definitions"].get(role)
@@ -1537,10 +1623,12 @@ def _observe_unit(names: runner_policy.RunNames, role: str, deadline_ns: int,
     if unit_info.st_dev != definition["device"] or unit_info.st_ino != definition["inode"]:
         _fail("unit-fragment-identity-changed")
     cgroup = manager["control_group"]
-    if type(cgroup) is not str or not cgroup.startswith("/"):
-        _fail("unit-cgroup-unavailable")
     expected_cgroup = f"/{expected_slice}/{unit}"
-    if cgroup != expected_cgroup:
+    if cgroup == "" and not active:
+        cgroup = expected_cgroup
+    elif type(cgroup) is not str or not cgroup.startswith("/"):
+        _fail("unit-cgroup-unavailable")
+    elif cgroup != expected_cgroup:
         _fail("unit-cgroup-path-mismatch")
     if properties["WorkingDirectory"] != "/" or properties["NoNewPrivileges"] != "yes":
         _fail("unit-process-boundary-mismatch")
@@ -1597,7 +1685,10 @@ def _observe_unit(names: runner_policy.RunNames, role: str, deadline_ns: int,
             or manager["main_pid"] != 0 or manager["control_pid"] != 0):
         _fail("unit-process-absence-unproved")
     try:
-        cg = _cgroup_snapshot(cgroup, budget, require_populated=True if active else None)
+        if not active and process is None and (manager["control_group"] == "" or type(previous) is dict):
+            cg = _owned_stopped_cgroup(names, role, properties, state)
+        else:
+            cg = _cgroup_snapshot(cgroup, budget, require_populated=True if active else None)
     except RuntimeFailure as error:
         if (error.code != "cgroup-removed" or active or process is not None
                 or manager["active_state"] not in {"inactive", "failed"}
@@ -1755,16 +1846,22 @@ def _load_state_from_names(names: runner_policy.RunNames) -> dict[str, Any]:
 
 def _update_state(store: Any, names: runner_policy.RunNames,
                   transform: Callable[[dict[str, Any]], dict[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] | None = None
     def checked(value: dict[str, Any]) -> dict[str, Any]:
+        nonlocal result
         state = _validate_state(value, names)
         updated = transform(copy.deepcopy(state))
-        return _validate_state(updated, names)
+        result = _validate_state(updated, names)
+        return result
     try:
-        return store.update_runtime_state(checked)
+        store.update_runtime_state(checked)
     except RuntimeFailure:
         raise
     except Exception:
         _fail("runtime-state-update-refused")
+    if result is None:
+        _fail("runtime-state-update-not-applied")
+    return result
 
 
 def _read_authority_header(names: runner_policy.RunNames) -> tuple[int, dict[str, object], dict[str, object]]:
@@ -2162,12 +2259,14 @@ class RuntimeControlState:
 
     def request_cancel(self, notice_ns: int) -> dict[str, object]:
         with self.lock:
-            if self.cancel_notice is not None:
-                return copy.deepcopy(self.cancel_notice)
             received = time.monotonic_ns()
             if (type(notice_ns) is not int or notice_ns < 1 or notice_ns > received
                     or notice_ns > self.outer_deadline_ns):
                 _fail("control-cancel-time-invalid")
+            if self.cancel_notice is not None:
+                if self.cancel_notice["notice_ns"] != str(notice_ns):
+                    _fail("control-cancel-replay")
+                return copy.deepcopy(self.cancel_notice)
             if self.phase in {"CLEANUP", "TERMINAL"} or self.terminal is not None:
                 _fail("control-cancel-after-cleanup")
             if self.live_probe is None:
@@ -2176,56 +2275,83 @@ class RuntimeControlState:
             if type(child_live) is not bool:
                 _fail("cancel-child-observation-invalid")
             record: dict[str, object] = {
-                "notice_ns": str(notice_ns), "received_ns": received,
-                "live_at_notice": bool(child_live), "child": child_observation,
+                'notice_ns': str(notice_ns), 'received_ns': received,
+                'live_at_notice': child_live, 'child': child_observation,
             }
             if self.cancel_handler is not None:
                 self.cancel_handler(record)
             self.cancel_notice = record
-            self.phase = "CANCEL_REQUESTED"
+            self.phase = 'CANCEL_REQUESTED'
             self.updated_ns = received
             return copy.deepcopy(record)
 
     def status(self) -> dict[str, object]:
         with self.lock:
-            if self.status_probe is None:
-                _fail("control-status-observation-unavailable")
-            refreshed = self.status_probe()
-            if type(refreshed) is not dict or type(refreshed.get("running")) is not bool:
-                _fail("control-status-observation-invalid")
-            running = refreshed["running"]
-            if refreshed.get("readiness_publication") in {"PENDING", "LOCAL_PUBLISHED", "FAILED", "UNKNOWN"}:
-                self.readiness_publication = refreshed["readiness_publication"]
-            if refreshed.get("terminal_publication") in {"PENDING", "LOCAL_PUBLISHED", "FAILED", "UNKNOWN"}:
-                self.terminal_publication = refreshed["terminal_publication"]
-            if type(refreshed.get("publisher_exit")) is int or refreshed.get("publisher_exit") is None:
-                self.publisher_exit = refreshed.get("publisher_exit")
+            status_probe = self.status_probe
+        if status_probe is None:
+            _fail('control-status-observation-unavailable')
+        refreshed = status_probe()
+        if type(refreshed) is not dict or type(refreshed.get('running')) is not bool:
+            _fail('control-status-observation-invalid')
+        running = refreshed['running']
+        with self.lock:
+            readiness_publication = refreshed.get('readiness_publication')
+            if readiness_publication not in {'PENDING', 'LOCAL_PUBLISHED', 'FAILED', 'UNKNOWN'}:
+                readiness_publication = self.readiness_publication
+            terminal_publication = refreshed.get('terminal_publication')
+            if terminal_publication not in {'PENDING', 'LOCAL_PUBLISHED', 'FAILED', 'UNKNOWN'}:
+                terminal_publication = self.terminal_publication
+            publisher_exit = refreshed.get('publisher_exit')
+            if type(publisher_exit) is not int and publisher_exit is not None:
+                publisher_exit = self.publisher_exit
             ready = self.readiness is not None
             terminal = self.terminal is not None
             if terminal:
-                state = "TERMINAL"
-            elif self.phase == "CLEANUP":
-                state = "CLEANUP"
+                state = 'TERMINAL'
+            elif self.phase == 'CLEANUP':
+                state = 'CLEANUP'
             elif self.cancel_notice is not None:
-                state = "CANCEL_REQUESTED" if running or ready else "CLEANUP"
+                state = 'CANCEL_REQUESTED' if running or ready else 'CLEANUP'
             elif ready:
-                state = "READY" if running else "CLEANUP"
+                state = 'READY' if running else 'CLEANUP'
             else:
-                state = "WAITING"
+                state = 'WAITING'
             return {
-                "schema": 1, "run": self.context["run"], "attempt": self.context["attempt"],
-                "state": state, "ready": ready, "running": running,
-                "cancel_ack": self.cancel_notice is not None,
-                "cancel_notice_ns": None if self.cancel_notice is None else self.cancel_notice["notice_ns"],
-                "cancel_received_ns": None if self.cancel_notice is None else str(self.cancel_notice["received_ns"]),
-                "live_at_notice": None if self.cancel_notice is None else self.cancel_notice["live_at_notice"],
-                "terminal": terminal,
-                "readiness_publication": self.readiness_publication,
-                "terminal_publication": self.terminal_publication,
-                "publisher_exit": self.publisher_exit, "snapshot_sha256": self.snapshot_sha256,
-                "updated_ns": str(self.updated_ns), "boot_id": self.boot_id,
-                "nonce": self.nonce, "source": copy.deepcopy(self.source),
+                'schema': 1, 'run': self.context['run'], 'attempt': self.context['attempt'],
+                'state': state, 'ready': ready, 'running': running,
+                'cancel_ack': self.cancel_notice is not None,
+                'cancel_notice_ns': None if self.cancel_notice is None else self.cancel_notice['notice_ns'],
+                'cancel_received_ns': None if self.cancel_notice is None else str(self.cancel_notice['received_ns']),
+                'live_at_notice': None if self.cancel_notice is None else self.cancel_notice['live_at_notice'],
+                'terminal': terminal, 'readiness_publication': readiness_publication,
+                'terminal_publication': terminal_publication, 'publisher_exit': publisher_exit,
+                'snapshot_sha256': self.snapshot_sha256, 'updated_ns': str(self.updated_ns),
+                'boot_id': self.boot_id, 'nonce': self.nonce, 'source': copy.deepcopy(self.source),
             }
+
+    @property
+    def admitted_identity(self) -> dict[str, object] | None:
+        with self.lock:
+            return copy.deepcopy(self._admitted_identity)
+
+    @admitted_identity.setter
+    def admitted_identity(self, value: dict[str, object] | None) -> None:
+        with self.lock:
+            self._admitted_identity = copy.deepcopy(value)
+
+    def cancel_ack_response(self, record: dict[str, object]) -> dict[str, object]:
+        with self.lock:
+            if self.cancel_notice is None or record != self.cancel_notice:
+                _fail('control-cancel-ack-unavailable')
+            response: dict[str, object] = {
+                'schema': 1, 'tag': 'CANCEL_ACK', 'run': self.context['run'], 'attempt': self.context['attempt'],
+                'cancel_ack': True, 'cancel_notice_ns': self.cancel_notice['notice_ns'],
+                'cancel_received_ns': str(self.cancel_notice['received_ns']),
+                'boot_id': self.boot_id, 'nonce': self.nonce, 'source': copy.deepcopy(self.source),
+            }
+            if set(response) != _CONTROL_CANCEL_ACK_FIELDS:
+                _fail('control-cancel-ack-schema')
+            return response
 
 
 class ControlServer:
@@ -2234,11 +2360,17 @@ class ControlServer:
     def __init__(self, path: str | os.PathLike[str], state: RuntimeControlState):
         self.path = os.fspath(path)
         if not isinstance(state, RuntimeControlState) or len(os.fsencode(self.path)) >= 104:
-            _fail("control-endpoint-invalid")
+            _fail('control-endpoint-invalid')
         self.state = state
         self.listener: socket.socket | None = None
         self.identity: tuple[int, int, int, int, int] | None = None
         self.closed = False
+        self._lifecycle_lock = threading.RLock()
+        self._connections: set[socket.socket] = set()
+        self._serve_thread: threading.Thread | None = None
+        self._status_thread: threading.Thread | None = None
+        self._close_complete = threading.Event()
+        self._close_failed = False
 
     def start(self) -> "ControlServer":
         parent = os.path.dirname(self.path)
@@ -2278,30 +2410,81 @@ class ControlServer:
             raise
 
     def close(self) -> None:
-        if self.closed:
+        current_thread = threading.current_thread()
+        deadline_ns = min(self.state.outer_deadline_ns, time.monotonic_ns() + 2 * _NS)
+        with self._lifecycle_lock:
+            if self.closed:
+                close_complete = self._close_complete
+                owned_thread = current_thread in {self._serve_thread, self._status_thread}
+                owner = False
+            else:
+                self.closed = True
+                close_complete = self._close_complete
+                owned_thread = False
+                owner = True
+                listener = self.listener
+                self.listener = None
+                connections = tuple(self._connections)
+                serve_thread = self._serve_thread
+                status_thread = self._status_thread
+        if not owner:
+            if not owned_thread:
+                remaining = max(0, deadline_ns - time.monotonic_ns()) / _NS
+                if not close_complete.wait(remaining):
+                    _fail("control-server-close-timeout")
+                with self._lifecycle_lock:
+                    if self._close_failed:
+                        _fail("control-server-close-incomplete")
             return
-        self.closed = True
-        listener = self.listener
-        self.listener = None
-        if listener is not None:
-            listener.close()
-        if self.identity is not None:
-            try:
-                current = os.stat(self.path, follow_symlinks=False)
-            except FileNotFoundError:
-                return
-            identity = (current.st_dev, current.st_ino, current.st_uid, current.st_gid, stat.S_IMODE(current.st_mode))
-            if identity == self.identity and stat.S_ISSOCK(current.st_mode):
-                os.unlink(self.path)
-                parent_fd = os.open(os.path.dirname(self.path), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        try:
+            if listener is not None:
+                listener.close()
+            for connection in connections:
                 try:
-                    os.fsync(parent_fd)
-                finally:
-                    os.close(parent_fd)
+                    connection.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                connection.close()
+            for thread in (serve_thread, status_thread):
+                if thread is not None and thread is not current_thread:
+                    thread.join(max(0, deadline_ns - time.monotonic_ns()) / _NS)
+                    if thread.is_alive():
+                        _fail("control-server-worker-not-reaped")
+            with self._lifecycle_lock:
+                if self._connections:
+                    _fail("control-server-connections-not-reaped")
+            if self.identity is not None:
+                try:
+                    current = os.stat(self.path, follow_symlinks=False)
+                except FileNotFoundError:
+                    return
+                identity = (current.st_dev, current.st_ino, current.st_uid, current.st_gid, stat.S_IMODE(current.st_mode))
+                if identity == self.identity and stat.S_ISSOCK(current.st_mode):
+                    os.unlink(self.path)
+                    parent_fd = os.open(os.path.dirname(self.path), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+                    try:
+                        os.fsync(parent_fd)
+                    finally:
+                        os.close(parent_fd)
+        except BaseException:
+            with self._lifecycle_lock:
+                self._close_failed = True
+            raise
+        finally:
+            close_complete.set()
 
     def serve_forever(self) -> None:
-        while not self.closed:
-            listener = self.listener
+        current_thread = threading.current_thread()
+        with self._lifecycle_lock:
+            if self.closed:
+                return
+            if self._serve_thread is not current_thread:
+                _fail('control-server-thread-unregistered')
+        while True:
+            with self._lifecycle_lock:
+                if self.closed:
+                    return
+                listener = self.listener
             if listener is None:
                 return
             try:
@@ -2309,23 +2492,29 @@ class ControlServer:
             except socket.timeout:
                 continue
             except OSError:
-                if self.closed:
-                    return
+                with self._lifecycle_lock:
+                    if self.closed:
+                        return
                 time.sleep(0.05)
                 continue
-            with connection:
-                connection.settimeout(0.5)
-                self._serve_client(connection)
+            connection.settimeout(0.5)
+            with self._lifecycle_lock:
+                if self.closed:
+                    connection.close()
+                    return
+                self._connections.add(connection)
+            self._serve_client(connection)
 
     def _serve_client(self, connection: socket.socket) -> None:
+        transferred = False
         try:
             raw_peer = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
             if len(raw_peer) != 12:
-                _fail("control-peer-unavailable")
-            pid, uid, gid = __import__("struct").unpack("=3i", raw_peer)
+                _fail('control-peer-unavailable')
+            pid, uid, gid = __import__('struct').unpack('=3i', raw_peer)
             expected = self.state.dispatcher
             if (pid != expected.pid or uid != expected.uid or gid != expected.gid):
-                _fail("control-peer-refused")
+                _fail('control-peer-refused')
             require_same_process(expected)
             request = bytearray()
             while len(request) <= _MAX_CTRL_REQUEST:
@@ -2333,37 +2522,94 @@ class ControlServer:
                 if not piece:
                     break
                 request.extend(piece)
-                if b"\n" in request:
+                if b'\n' in request:
                     break
-            if len(request) > _MAX_CTRL_REQUEST or request.count(b"\n") != 1 or not request.endswith(b"\n"):
-                _fail("control-request-size")
+            if len(request) > _MAX_CTRL_REQUEST or request.count(b'\n') != 1 or not request.endswith(b'\n'):
+                _fail('control-request-size')
             value = _strict_json(bytes(request[:-1]), _MAX_CTRL_REQUEST)
             if type(value) is not dict:
-                _fail("control-request-invalid")
-            operation = value.get("op")
-            if operation == "STATUS" and set(value) == {"op"}:
-                response = self.state.status()
-            elif operation == "CANCEL" and set(value) == {"op", "notice_ns"}:
-                if self.state.scenario != "workflow-cancel":
-                    _fail("control-cancel-not-admitted")
-                text = value["notice_ns"]
-                if type(text) is not str or re.fullmatch(r"[1-9][0-9]{0,19}", text) is None:
-                    _fail("control-cancel-time-invalid")
+                _fail('control-request-invalid')
+            operation = value.get('op')
+            if operation == 'STATUS' and set(value) == {'op'}:
+                with self._lifecycle_lock:
+                    if self.closed:
+                        busy = True
+                    else:
+                        worker = self._status_thread
+                        busy = worker is not None and worker.is_alive()
+                        if not busy:
+                            if worker is not None:
+                                worker.join()
+                            worker = threading.Thread(
+                                target=self._serve_status, args=(connection,),
+                                name='runner-control-status', daemon=True,
+                            )
+                            self._status_thread = worker
+                            worker.start()
+                            transferred = True
+                if busy:
+                    self._send_error(connection)
+                return
+            if operation == 'CANCEL' and set(value) == {'op', 'notice_ns'}:
+                if self.state.scenario != 'workflow-cancel':
+                    _fail('control-cancel-not-admitted')
+                text = value['notice_ns']
+                if type(text) is not str or re.fullmatch(r'[1-9][0-9]{0,19}', text) is None:
+                    _fail('control-cancel-time-invalid')
                 notice = int(text)
                 now = time.monotonic_ns()
                 if notice < 1 or notice > now or notice > self.state.outer_deadline_ns:
-                    _fail("control-cancel-time-invalid")
-                self.state.request_cancel(notice)
-                response = self.state.status()
+                    _fail('control-cancel-time-invalid')
+                record = self.state.request_cancel(notice)
+                response = self.state.cancel_ack_response(record)
             else:
-                _fail("control-request-invalid")
-            reply = _canonical(response, _MAX_CTRL_REPLY) + b"\n"
+                _fail('control-request-invalid')
+            self._send_response(connection, response)
         except Exception:
-            reply = b'{"error":"control peer refused"}\n'
+            self._send_error(connection)
+        finally:
+            if not transferred:
+                self._release_connection(connection)
+
+    def _serve_status(self, connection: socket.socket) -> None:
         try:
-            connection.sendall(reply)
+            self._send_response(connection, self.state.status())
+        except Exception:
+            self._send_error(connection)
+        finally:
+            self._release_connection(connection)
+
+    @staticmethod
+    def _send_response(connection: socket.socket, response: dict[str, object]) -> None:
+        try:
+            connection.sendall(_canonical(response, _MAX_CTRL_REPLY) + b'\n')
         except OSError:
             return
+
+    @classmethod
+    def _send_error(cls, connection: socket.socket) -> None:
+        cls._send_response(connection, {'error': 'control peer refused'})
+
+    def _release_connection(self, connection: socket.socket) -> None:
+        with self._lifecycle_lock:
+            self._connections.discard(connection)
+        try:
+            connection.close()
+        except OSError:
+            pass
+
+    def start_serving(self, *, name: str, daemon: bool = True) -> threading.Thread:
+        with self._lifecycle_lock:
+            if self.closed or self.listener is None or self._serve_thread is not None:
+                _fail('control-server-start-invalid')
+            thread = threading.Thread(target=self.serve_forever, name=name, daemon=daemon)
+            self._serve_thread = thread
+            try:
+                thread.start()
+            except BaseException:
+                self._serve_thread = None
+                raise
+            return thread
 
 
 class _SystemdControl:
@@ -2809,8 +3055,7 @@ def _reap(names: runner_policy.RunNames) -> int:
             control_state.cancel_notice = copy.deepcopy(state["cancel_notice"])
             control_state.phase = "CANCEL_REQUESTED"
         control = ControlServer(os.path.join(names.control, "status.sock"), control_state).start()
-        control_thread = threading.Thread(target=control.serve_forever, name="runner-status-stream", daemon=True)
-        control_thread.start()
+        control_thread = control.start_serving(name="runner-status-stream", daemon=True)
         if not _process_identity_live(dispatcher):
             _set_cause(store, names, "dispatcher-dead")
             return _finish_cleanup(
@@ -3159,10 +3404,21 @@ def _runtime_claims(token: str) -> tuple[str, str]:
     claims = _strict_json(decoded, 16 * 1024)
     if type(claims) is not dict:
         _fail("runtime-token-claims-invalid")
-    run_id = claims.get("workflow_run_backend_id")
-    job_id = claims.get("workflow_job_run_backend_id")
-    if (type(run_id) is not str or re.fullmatch(r"[A-Za-z0-9._-]{1,64}", run_id) is None
-            or type(job_id) is not str or re.fullmatch(r"[A-Za-z0-9._-]{1,64}", job_id) is None):
+    scp = claims.get("scp")
+    if type(scp) is not str or not scp:
+        _fail("runtime-backend-identity-unavailable")
+    results_scopes = [
+        scope for scope in scp.split(" ")
+        if scope.split(":", 1)[0] == "Actions.Results"
+    ]
+    if len(results_scopes) != 1:
+        _fail("runtime-backend-identity-unavailable")
+    scope_parts = results_scopes[0].split(":")
+    if len(scope_parts) != 3:
+        _fail("runtime-backend-identity-unavailable")
+    run_id, job_id = scope_parts[1:]
+    if (re.fullmatch(r"[A-Za-z0-9._-]{1,64}", run_id) is None
+            or re.fullmatch(r"[A-Za-z0-9._-]{1,64}", job_id) is None):
         _fail("runtime-backend-identity-unavailable")
     return run_id, job_id
 
@@ -3294,6 +3550,7 @@ def _publisher_child(names: runner_policy.RunNames, store: Any,
     )
     guard_instance = None
     host_fd = -1
+    output_fd = -1
     try:
         host_fd = os.open("/proc/1/ns/net", os.O_RDONLY | os.O_CLOEXEC)
         if os.get_inheritable(host_fd) or os.readlink("/proc/self/ns/net") == os.readlink(f"/proc/self/fd/{host_fd}"):
@@ -3308,11 +3565,14 @@ def _publisher_child(names: runner_policy.RunNames, store: Any,
         node = _secure_node_from_state(state, deadline_ns)
         output_name = kind + "-output"
         output_path = os.path.join(scratch, output_name)
-        output_fd = os.open(output_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+        output_fd = os.open(output_path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
         os.fchmod(output_fd, 0o600)
         output_info = os.fstat(output_fd)
+        if (not stat.S_ISREG(output_info.st_mode)
+                or (output_info.st_uid, output_info.st_gid, stat.S_IMODE(output_info.st_mode), output_info.st_nlink)
+                != (0, 0, 0o600, 1)):
+            _fail("publisher-output-identity")
         os.fsync(output_fd)
-        os.close(output_fd)
         environment = {
             "PATH": "/usr/bin:/bin", "HOME": "/tmp", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
             "GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": "junited31/dotunnel",
@@ -3369,7 +3629,7 @@ def _publisher_child(names: runner_policy.RunNames, store: Any,
                 if observed.exe_device == os.stat(node, follow_symlinks=False).st_dev and observed.exe_inode == os.stat(node, follow_symlinks=False).st_ino:
                     child_identity = observed
                     child_birth = observed.birth
-                    _verify_publisher_child(observed, runtime["ACTIONS_RUNTIME_TOKEN"], output_info)
+                    _verify_publisher_child(observed, runtime["ACTIONS_RUNTIME_TOKEN"])
             except ProcessLookupError:
                 pass
             time.sleep(min(0.05, remain / _NS))
@@ -3378,22 +3638,7 @@ def _publisher_child(names: runner_policy.RunNames, store: Any,
             return exit_code, None
         if child_identity is None or child_birth is None:
             _fail("publisher-child-identity-unobserved")
-        require_same_process(child_identity) if child.poll() is None else None
-        try:
-            output_fd = os.open(output_path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
-        except OSError:
-            _fail("publisher-output-unavailable")
-        try:
-            output_stat = os.fstat(output_fd)
-            named_stat = os.stat(output_path, follow_symlinks=False)
-            if ((output_stat.st_dev, output_stat.st_ino, output_stat.st_uid, output_stat.st_gid,
-                 stat.S_IMODE(output_stat.st_mode), output_stat.st_nlink)
-                    != (output_info.st_dev, output_info.st_ino, 0, 0, 0o600, 1)
-                    or (named_stat.st_dev, named_stat.st_ino) != (output_info.st_dev, output_info.st_ino)):
-                _fail("publisher-output-identity")
-            raw_output = _read_fd(output_fd, 4 * 1024)
-        finally:
-            os.close(output_fd)
+        raw_output = _read_verified_publisher_output(output_fd, output_path, output_info)
         result = runner_artifact.parse_publisher_output(raw_output)
         if (not policy.finalized or policy.uploaded_size <= 0
                 or policy.uploaded_size > 128 * 1024
@@ -3401,14 +3646,19 @@ def _publisher_child(names: runner_policy.RunNames, store: Any,
             _fail("publisher-finalization-unobserved")
         return exit_code, result
     finally:
-        if guard_instance is not None:
-            guard_instance.close()
-        if host_fd >= 0:
-            os.close(host_fd)
+        try:
+            if guard_instance is not None:
+                guard_instance.close()
+        finally:
+            try:
+                if output_fd >= 0:
+                    os.close(output_fd)
+            finally:
+                if host_fd >= 0:
+                    os.close(host_fd)
 
 
-def _verify_publisher_child(identity: ProcessIdentity, runtime_token: str,
-                            output_info: os.stat_result) -> None:
+def _verify_publisher_child(identity: ProcessIdentity, runtime_token: str) -> None:
     if (identity.uid != 0 or identity.gid != 0
             or identity.cap_eff.strip("0") or identity.cap_prm.strip("0")
             or identity.cap_bnd.strip("0") or identity.cap_amb.strip("0")
@@ -3416,19 +3666,46 @@ def _verify_publisher_child(identity: ProcessIdentity, runtime_token: str,
         _fail("publisher-capability-boundary")
     if any(runtime_token.encode("ascii") in row[-1].encode("utf-8", "surrogatepass") for row in identity.held_fds):
         _fail("publisher-secret-in-fd-name")
-    has_output_fd = False
     for row in identity.held_fds:
-        fd, device, inode, _uid, _gid, _mode, target = row
+        fd, _device, _inode, _uid, _gid, _mode, target = row
         if target == "" or fd < 0:
             _fail("publisher-fd-identity")
-        try:
-            held = os.stat(f"/proc/{identity.pid}/fd/{fd}", follow_symlinks=True)
-        except OSError:
-            continue
-        if (held.st_dev, held.st_ino) == (output_info.st_dev, output_info.st_ino):
-            has_output_fd = True
-    if not has_output_fd:
-        _fail("publisher-output-fd-not-held")
+
+def _read_verified_publisher_output(output_fd: int, output_path: str,
+                                    output_info: os.stat_result) -> bytes:
+    if (not stat.S_ISREG(output_info.st_mode)
+            or stat.S_IMODE(output_info.st_mode) != 0o600 or output_info.st_nlink != 1):
+        _fail("publisher-output-identity")
+    expected = (
+        output_info.st_dev, output_info.st_ino, output_info.st_uid, output_info.st_gid,
+        stat.S_IMODE(output_info.st_mode), output_info.st_nlink,
+    )
+    try:
+        before = os.fstat(output_fd)
+        named = os.stat(output_path, follow_symlinks=False)
+    except OSError:
+        _fail("publisher-output-unavailable")
+    if (not stat.S_ISREG(before.st_mode) or not stat.S_ISREG(named.st_mode)
+            or (before.st_dev, before.st_ino, before.st_uid, before.st_gid,
+                stat.S_IMODE(before.st_mode), before.st_nlink) != expected
+            or (named.st_dev, named.st_ino) != (output_info.st_dev, output_info.st_ino)
+            or before.st_size > 4 * 1024):
+        _fail("publisher-output-identity")
+    try:
+        os.lseek(output_fd, 0, os.SEEK_SET)
+        raw = _read_fd(output_fd, 4 * 1024)
+        after = os.fstat(output_fd)
+        named_after = os.stat(output_path, follow_symlinks=False)
+    except OSError:
+        _fail("publisher-output-unavailable")
+    if (not stat.S_ISREG(after.st_mode) or not stat.S_ISREG(named_after.st_mode)
+            or (after.st_dev, after.st_ino, after.st_uid, after.st_gid,
+                stat.S_IMODE(after.st_mode), after.st_nlink) != expected
+            or after.st_size != before.st_size or after.st_size != len(raw)
+            or after.st_mtime_ns != before.st_mtime_ns or after.st_ctime_ns != before.st_ctime_ns
+            or (named_after.st_dev, named_after.st_ino) != (output_info.st_dev, output_info.st_ino)):
+        _fail("publisher-output-identity")
+    return raw
 
 
 def _publish(names: runner_policy.RunNames, kind: str) -> int:
@@ -3558,6 +3835,12 @@ def _stop_owned_unit(names: runner_policy.RunNames, role: str,
     expected_cgroup = expected.get("cgroup") if type(expected) is dict else None
     old_pids = [] if type(expected_cgroup) is not dict else expected_cgroup.get("pids", [])
     if props["LoadState"] == "not-found":
+        if type(expected) is dict:
+            stopped_cgroup = _owned_stopped_cgroup(names, role, props, state)
+            return {
+                **_unit_absence(unit, props), "invocation_id": None,
+                "cgroup": stopped_cgroup, "pids_gone": True,
+            }
         absence = _unit_absence(unit, props)
         for row in old_pids:
             if not _pid_birth_gone(row):
@@ -3594,6 +3877,13 @@ def _stop_owned_unit(names: runner_policy.RunNames, role: str,
             _fail("cleanup-active-unit-owner-mismatch")
         if expected is not None:
             _fail("cleanup-unit-generation-mismatch")
+    if props["InvocationID"] == "" and props["ControlGroup"] == "":
+        never_started = _never_started_observation(names, state, role, props)
+        return {
+            **never_started, "load_state": "loaded", "active_state": "inactive",
+            "main_pid": 0, "control_pid": 0,
+            "cgroup": {"present": False, "observed_absent": True}, "pids_gone": True,
+        }
     current_pids = _unit_pid_births(before_cgroup)
     pids_before = current_pids + [row for row in old_pids if row not in current_pids]
     if type(expected_cgroup) is dict:
@@ -3621,8 +3911,8 @@ def _stop_owned_unit(names: runner_policy.RunNames, role: str,
             absence = _unit_absence(unit, fresh)
             main_pid = control_pid = 0
             active_state = "inactive"
-            cgroup = None
-            cgroup_present = False
+            cgroup = _owned_stopped_cgroup(names, role, fresh, state)
+            cgroup_present = cgroup["present"] is True
         else:
             if (fresh["LoadState"] != "loaded" or fresh["FragmentPath"] != _unit_file_name(unit)
                     or fresh["DropInPaths"]):
@@ -3633,10 +3923,19 @@ def _stop_owned_unit(names: runner_policy.RunNames, role: str,
             control_pid = _parse_unsigned(fresh["ControlPID"], "cleanup-control-pid")
             active_state = fresh["ActiveState"]
             try:
-                cgroup = _cgroup_snapshot(
-                    fresh["ControlGroup"], runner_policy.BUDGETS[budget], require_populated=False,
-                )
-                cgroup_present = True
+                if active_state in {"inactive", "failed"} and main_pid == 0 and control_pid == 0:
+                    cgroup = _owned_stopped_cgroup(names, role, fresh, state)
+                else:
+                    if type(expected) is not dict or fresh["ControlGroup"] != expected["control_group"]:
+                        _fail("cleanup-cgroup-path-mismatch")
+                    cgroup = _cgroup_snapshot(
+                        fresh["ControlGroup"], runner_policy.BUDGETS[budget], require_populated=False,
+                    )
+                    if type(expected_cgroup) is dict and (
+                            cgroup["device"] != expected_cgroup.get("device")
+                            or cgroup["inode"] != expected_cgroup.get("inode")):
+                        _fail("cleanup-cgroup-generation-mismatch")
+                cgroup_present = cgroup["present"] is True
             except RuntimeFailure as error:
                 if error.code != "cgroup-removed":
                     raise
@@ -4010,6 +4309,10 @@ _CONTROL_STATUS_FIELDS = frozenset({
     "cancel_notice_ns", "cancel_received_ns", "live_at_notice", "terminal",
     "readiness_publication", "terminal_publication", "publisher_exit",
     "snapshot_sha256", "updated_ns", "boot_id", "nonce", "source",
+})
+_CONTROL_CANCEL_ACK_FIELDS = frozenset({
+    "schema", "tag", "run", "attempt", "cancel_ack", "cancel_notice_ns",
+    "cancel_received_ns", "boot_id", "nonce", "source",
 })
 
 
@@ -4668,17 +4971,46 @@ def _wait_publisher_quiescent(names: runner_policy.RunNames, store: Any,
                               kind: str, deadline_ns: int) -> dict[str, object]:
     role = "publisher-readiness" if kind == "readiness" else "publisher-terminal"
     unit = _unit_name(names, role)
-    while time.monotonic_ns() < deadline_ns:
-        props = _show_unit(unit, min(deadline_ns, time.monotonic_ns() + 2 * _NS))
+    # Fresh ownership (2s), bounded stop (1s), and journal (1s) stay inside
+    # the caller's unchanged deadline; short windows reduce each reservation.
+    observe_deadline_ns = deadline_ns - 4 * _NS
+    while time.monotonic_ns() < observe_deadline_ns:
+        props = _show_unit(unit, min(observe_deadline_ns, time.monotonic_ns() + 2 * _NS))
         if props["LoadState"] == "loaded" and props["ActiveState"] in {"inactive", "failed"}:
             current = _load_state(store, names)
             result = current["publication"][kind]
             if result["state"] in {"LOCAL_PUBLISHED", "FAILED"}:
+                _stop_owned_unit(names, role, current, deadline_ns)
                 return result
-        time.sleep(0.05)
-    _set_cause(store, names, "publisher-deadline")
-    _systemctl(["--no-block", "stop", unit], min(deadline_ns, time.monotonic_ns() + _NS))
-    _mark_publication(store, names, kind, "UNKNOWN", None, None)
+        remaining = observe_deadline_ns - time.monotonic_ns()
+        if remaining > 0:
+            time.sleep(min(0.05, remaining / _NS))
+    def mark_unknown(value: dict[str, Any]) -> dict[str, Any]:
+        record = value["publication"][kind]
+        if record["state"] == "PENDING":
+            if value["original_cause"] is None:
+                value["original_cause"] = "publisher-deadline"
+            record.update({
+                "state": "UNKNOWN", "exit_code": None, "artifact_id": None,
+                "digest": None, "url": None, "updated_ns": time.monotonic_ns(),
+            })
+        return value
+    # Commit uncertainty before a stop can fail or terminate its own actor;
+    # a concurrent already-committed result remains immutable.
+    current = _update_state(store, names, mark_unknown)
+    if current["publication"][kind]["state"] in {"LOCAL_PUBLISHED", "FAILED"}:
+        _stop_owned_unit(names, role, current, deadline_ns)
+        return current["publication"][kind]
+    remaining = max(0, deadline_ns - time.monotonic_ns())
+    reserve_ns = min(_NS, remaining // 4)
+    owned = _stop_owned_unit(
+        names, role, current, min(deadline_ns - 2 * reserve_ns, time.monotonic_ns() + 2 * _NS),
+        skip=True,
+    )
+    if owned["load_state"] == "loaded" and owned["active_state"] in {"active", "activating", "deactivating"}:
+        if type(owned.get("cgroup")) is not dict or owned["cgroup"].get("present") is not True:
+            _fail("publisher-stop-cgroup-unavailable")
+        _systemctl(["--no-block", "stop", unit], min(deadline_ns - reserve_ns, time.monotonic_ns() + _NS))
     return _load_state(store, names)["publication"][kind]
 
 
@@ -4713,33 +5045,24 @@ def _publishers_quiescent(names: runner_policy.RunNames,
                 or _parse_unsigned(props["ControlPID"], "publisher-control-pid") != 0):
             return False
         expected = state["units"].get(role)
-        expected_cgroup = expected.get("cgroup") if type(expected) is dict else None
-        if type(expected) is dict and (
-                props["InvocationID"] != expected.get("invocation_id")
-                or props["ControlGroup"] != expected.get("control_group")):
-            return False
-        if props["ControlGroup"] != f"/{_slice_name(names, role)}/{unit}":
+        _read_unit_definition(unit, definition)
+        if type(expected) is not dict:
+            if props["InvocationID"] != "":
+                return False
+            _never_started_observation(names, state, role, props)
+            continue
+        if props["InvocationID"] != expected.get("invocation_id"):
             return False
         try:
-            actual_cgroup = _cgroup_snapshot(
-                props["ControlGroup"], runner_policy.BUDGETS["publisher"],
-                require_populated=False,
-            )
+            _owned_stopped_cgroup(names, role, props, state)
         except RuntimeFailure as error:
-            if error.code != "cgroup-removed":
-                raise
-            if type(expected_cgroup) is dict and not all(
-                    _pid_birth_gone(row) for row in expected_cgroup.get("pids", [])):
+            if error.code in {
+                "unit-stopped-generation-unavailable", "unit-stopped-cgroup-record-mismatch",
+                "unit-stopped-manager-generation-mismatch", "unit-stopped-recorded-process-live",
+                "unit-stopped-cgroup-generation-mismatch",
+            }:
                 return False
-            continue
-        if type(expected_cgroup) is dict and (
-                actual_cgroup["device"] != expected_cgroup.get("device")
-                or actual_cgroup["inode"] != expected_cgroup.get("inode")):
-            return False
-        if (actual_cgroup["populated"] is not False or actual_cgroup["pids"]
-                or type(expected_cgroup) is dict
-                and not all(_pid_birth_gone(row) for row in expected_cgroup.get("pids", []))):
-            return False
+            raise
     return True
 
 

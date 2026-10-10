@@ -36,19 +36,21 @@ class RunnerCommandTests(unittest.TestCase):
             self.command("import os; os.write(1, b'x' * 32)", output_limit=32),
             (0, b"x" * 32, b""),
         )
-        with self.assertRaisesRegex(runner_runtime.RuntimeFailure, "fixed-command-output-limit"):
+        with self.assertRaises(runner_runtime.RuntimeFailure) as refused:
             self.command("import os; os.write(2, b'x' * 33)", output_limit=32)
+        self.assertEqual(refused.exception.code, "fixed-command-output-limit")
 
     def test_deadline_kills_and_reaps_actual_child(self):
         with tempfile.TemporaryDirectory(prefix="dotunnel-command-deadline-") as directory:
             marker = Path(directory) / "pid"
-            with self.assertRaisesRegex(runner_runtime.RuntimeFailure, "fixed-command-timeout"):
+            with self.assertRaises(runner_runtime.RuntimeFailure) as refused:
                 self.command(
                     "import os,pathlib,time; "
                     f"pathlib.Path({str(marker)!r}).write_text(str(os.getpid())); "
                     "time.sleep(30)",
                     timeout=1,
                 )
+            self.assertEqual(refused.exception.code, "fixed-command-timeout")
             pid = int(marker.read_text())
             with self.assertRaises(ProcessLookupError):
                 os.kill(pid, 0)
@@ -56,8 +58,9 @@ class RunnerCommandTests(unittest.TestCase):
     def test_expired_deadline_refuses_child_before_effect(self):
         with tempfile.TemporaryDirectory(prefix="dotunnel-command-refusal-") as directory:
             marker = Path(directory) / "effect"
-            with self.assertRaisesRegex(runner_runtime.RuntimeFailure, "fixed-command-refused"):
+            with self.assertRaises(runner_runtime.RuntimeFailure) as refused:
                 self.command(f"from pathlib import Path; Path({str(marker)!r}).write_bytes(b'changed')", timeout=0)
+            self.assertEqual(refused.exception.code, "fixed-command-refused")
             self.assertFalse(marker.exists())
 
 
@@ -78,8 +81,9 @@ class RunnerManagerDurationTests(unittest.TestCase):
     def test_manager_duration_rejects_invalid_or_nonfinite_values(self):
         for text in ("", "infinity", "-1s", "1s extra", "1ns", "1e3s", "0.0000001s", "18446744073709551615us", "99999999999999999999y"):
             with self.subTest(text=text):
-                with self.assertRaisesRegex(runner_runtime.RuntimeFailure, "invalid-duration"):
+                with self.assertRaises(runner_runtime.RuntimeFailure) as refused:
                     runner_runtime._manager_duration(text, "invalid-duration")
+                self.assertEqual(refused.exception.code, "invalid-duration")
 
 
 if __name__ == "__main__":

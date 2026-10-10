@@ -393,8 +393,7 @@ class RunnerRuntimeControlTests(unittest.TestCase):
         )
         self.server = runner_runtime.ControlServer(self.path, self.state)
         self.server.start()
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-        self.thread.start()
+        self.thread = self.server.start_serving(name="runner-status-stream", daemon=True)
         self.addCleanup(self.thread.join, 2)
         self.addCleanup(self.server.close)
     def _stop_child(self):
@@ -480,15 +479,17 @@ class RunnerRuntimeControlTests(unittest.TestCase):
         notice = time.monotonic_ns()
         request = {"op": "CANCEL", "notice_ns": str(notice)}
         first = self.request(request)
-        self.assertEqual(first["state"], "CANCEL_REQUESTED")
+        self.assertEqual(first["tag"], "CANCEL_ACK")
+        self.assertEqual(set(first), runner_runtime._CONTROL_CANCEL_ACK_FIELDS)
+        self.assertNotIn("running", first)
         self.assertEqual(first["cancel_notice_ns"], str(notice))
         self.assertGreaterEqual(int(first["cancel_received_ns"]), notice)
         recorded = self.state.cancel_notice
         self.assertEqual(json.loads(self.cancel_receipt_path.read_text(encoding="ascii")), recorded)
-        second = self.request({**request, "notice_ns": str(notice + 1)})
-        self.assertEqual(second["state"], "CANCEL_REQUESTED")
-        self.assertEqual(second["cancel_notice_ns"], str(notice))
-        self.assertEqual(second["cancel_received_ns"], first["cancel_received_ns"])
+        second = self.request(request)
+        self.assertEqual(second, first)
+        distinct = self.request({**request, "notice_ns": str(notice + 1)})
+        self.assertEqual(distinct, {"error": "control peer refused"})
         self.assertEqual(self.state.cancel_notice, recorded)
 
     def test_foreign_live_peer_cannot_read_or_cancel_dispatcher_state(self):

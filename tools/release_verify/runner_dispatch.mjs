@@ -1513,6 +1513,31 @@ function bindStatus(value, names, binding) {
   return status;
 }
 
+function bindCancelAck(value, names, binding, expectedNoticeNs) {
+  const fields = [
+    'schema', 'tag', 'run', 'attempt', 'cancel_ack', 'cancel_notice_ns',
+    'cancel_received_ns', 'boot_id', 'nonce', 'source',
+  ];
+  if (!exactKeys(value, fields) || value.schema !== 1 || value.tag !== 'CANCEL_ACK'
+      || value.run !== names.run || value.attempt !== names.attempt
+      || value.cancel_ack !== true || !positiveId(value.cancel_notice_ns)
+      || value.cancel_notice_ns !== expectedNoticeNs || !positiveId(value.cancel_received_ns)
+      || BigInt(value.cancel_notice_ns) > BigInt(value.cancel_received_ns)
+      || BigInt(value.cancel_received_ns) > BigInt(value.cancel_notice_ns) + CANCEL_DELIVERY_NS
+      || typeof value.boot_id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(value.boot_id)
+      || typeof value.nonce !== 'string' || !/^[0-9a-f]{32}$/u.test(value.nonce)
+      || !exactKeys(value.source, ['commit', 'closure_sha256'])
+      || typeof value.source.commit !== 'string' || !/^[0-9a-f]{40}$/u.test(value.source.commit)
+      || typeof value.source.closure_sha256 !== 'string' || !/^[0-9a-f]{64}$/u.test(value.source.closure_sha256)) fail('invalid-root-cancel-ack');
+  if ((binding.bootId !== null && binding.bootId !== value.boot_id)
+      || (binding.nonce !== null && binding.nonce !== value.nonce)
+      || (binding.source !== null && canonicalJson(binding.source) !== canonicalJson(value.source))) fail('root-control-binding-mismatch');
+  if (binding.bootId === null) binding.bootId = value.boot_id;
+  if (binding.nonce === null) binding.nonce = value.nonce;
+  if (binding.source === null) binding.source = Object.freeze({ ...value.source });
+  return value;
+}
+
 function validateControlRequest(request) {
   if (exactKeys(request, ['op']) && request.op === 'STATUS') return;
   if (exactKeys(request, ['op', 'notice_ns']) && request.op === 'CANCEL'
@@ -1603,6 +1628,11 @@ async function requestRootControl(socketPath, request, deadlineNs, names, bindin
   const current = await assertRootControlSocket(socketPath, names);
   if (current.dev !== identity.dev || current.ino !== identity.ino || current.gid !== identity.gid) fail('root-control-identity-changed');
   if (exactKeys(response, ['error']) && response.error === 'control peer refused') fail('root-control-peer-refused');
+  if (request.op === 'CANCEL') {
+    const ack = bindCancelAck(response, names, binding, request.notice_ns);
+    if (BigInt(ack.cancel_received_ns) > deadlineNs) fail('invalid-root-cancel-ack');
+    return ack;
+  }
   return bindStatus(response, names, binding);
 }
 
@@ -1696,7 +1726,14 @@ export function installCancellationHandler(socketPath, outerDeadlineNs, request 
         } catch (error) {
           if (!transientControlFailure(error)) return false;
         }
-        if (status?.cancel_ack === true) return true;
+        if (status?.cancel_ack === true) {
+          return process.hrtime.bigint() <= deadline
+            && status.tag === 'CANCEL_ACK'
+            && status.cancel_notice_ns === firstNoticeNs
+            && positiveId(status.cancel_received_ns)
+            && BigInt(status.cancel_received_ns) <= deadline
+            && BigInt(firstNoticeNs) <= BigInt(status.cancel_received_ns);
+        }
         const remaining = deadline - process.hrtime.bigint();
         if (remaining <= 0n) break;
         await new Promise((resolve) => setTimeout(resolve, Math.max(1, Math.min(25, Number(remaining / 1_000_000n)))));
