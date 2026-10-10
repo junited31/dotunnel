@@ -117,6 +117,7 @@ class ReleaseVerifyCIMonitoringTests(unittest.TestCase):
             f"    print(json.dumps({{'OSType':'linux','Architecture':'amd64','DockerRootDir':{str(home)!r},'ServerVersion':'26.1.0'}}))\n"
             "elif cmd[:2] == ['image','inspect']:\n"
             "    open(IMAGE_STARTED,'wb').close(); log('image-inspect'); time.sleep(0.35)\n"
+            "    print(json.dumps([{'Os':'linux','Architecture':'amd64','RepoDigests':[IMAGE]}]))\n"
             "elif cmd and cmd[0] == 'create':\n"
             "    state.update(exists=True,running=False); save(state); log('create'); print(CID)\n"
             "elif cmd[:2] == ['container','inspect']:\n"
@@ -448,7 +449,7 @@ class ReleaseVerifyCIMonitoringTests(unittest.TestCase):
             self.assertGreaterEqual(watchdog_wait_samples[0], 1, "watchdog exit wait sampled host resources")
             self.assertEqual(result["status"], "FAIL", result)
             self.assertEqual(result["reason"], "host-resource-telemetry-unavailable")
-            self.assertEqual(result["original_cause"], "host-resource-telemetry-unavailable")
+            self.assertIsNone(result["original_cause"], result)
             self.assertIn("host-resource-telemetry-unavailable", result["cleanup_failures"])
             self.assertEqual(result["host_telemetry"]["after"], healthy)
             self.assertTrue(result["cleanup_confirmed"], result)
