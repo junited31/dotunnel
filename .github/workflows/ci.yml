@@ -60,10 +60,11 @@ jobs:
           if (
             ulimit -f 64
             ulimit -c 0
+            # RLIMIT_FSIZE also caps bytecode files; never mutate shared Python caches.
             PYTHONPATH="$GITHUB_WORKSPACE:$GITHUB_WORKSPACE/tests" \
               /usr/bin/time -v timeout --signal=TERM --kill-after=2s 30s \
               taskset -c "$cpu" prlimit --as=805306368 --nproc=64 --nofile=256 --cpu=20 -- \
-              python -m unittest -v \
+              python -B -m unittest -v \
               test_release_verify_runner_transport.RunnerTransportTests.test_idle_authorized_tls_tunnel_does_not_starve_create
           ) >"$log" 2>&1; then status=0; else status=$?; fi
           cat "$log"
@@ -108,7 +109,7 @@ jobs:
             ulimit -c 0
             /usr/bin/time -v timeout --signal=TERM --kill-after=2s 15s \
               taskset -c "$cpu" prlimit --as=805306368 --nproc=64 --nofile=256 --cpu=10 -- \
-              python -I -S - <<'PY'
+              python -I -S -B - <<'PY'
           import json
           import os
           from pathlib import Path
@@ -120,7 +121,7 @@ jobs:
           prefix = 'dotunnelpilot' + run + 'a1'
           paths = (Path('/run') / prefix, Path('/run') / (prefix + '-source'))
           assert all(not path.exists() and not path.is_symlink() for path in paths)
-          command = [sys.executable, '-I', '-S', str(Path.cwd() / 'tools/release_verify/runner_prepare.py'), 'receipt-start', run, '1']
+          command = [sys.executable, '-I', '-S', '-B', str(Path.cwd() / 'tools/release_verify/runner_prepare.py'), 'receipt-start', run, '1']
           result = subprocess.run(command, input=b'not-an-authorized-runtime-payload', stdout=subprocess.PIPE, stderr=subprocess.PIPE, env={'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'}, timeout=3, check=False)
           assert result.returncode == 2, (result.returncode, result.stderr[:512])
           assert len(result.stdout) <= 4096 and not result.stderr
