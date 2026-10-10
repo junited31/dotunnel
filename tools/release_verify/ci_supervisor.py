@@ -2689,11 +2689,12 @@ def _run_pilot(spec: _Spec, policy: Policy) -> dict[str, object]:
             failure = failure or "host-resource-telemetry-unavailable"
         if failure is not None and resource_failure is None:
             resource_failure = failure
-        return resource_failure
+        return failure
 
     def check_resources() -> None:
         nonlocal reason, status
-        failure = sample_resources()
+        sample_resources()
+        failure = resource_failure
         if failure is not None:
             if status == "PASS" or reason in {"trusted-preflight-failed", "pilot-not-completed"}:
                 reason = failure

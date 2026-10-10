@@ -196,11 +196,10 @@ class ReleaseVerifyCIMonitoringTests(unittest.TestCase):
             def start_delayed_watchdog(*_args):
                 watchdog_started[0] = True
                 code = (
-                    "import sys,time\n"
+                    "import os,time\n"
                     "time.sleep(.25)\n"
                     "try:\n"
-                    " sys.stdout.write('READY\\n')\n"
-                    " sys.stdout.flush()\n"
+                    " os.write(1,b'READY\\n')\n"
                     "except BrokenPipeError:\n"
                     " pass\n"
                     "time.sleep(.2)\n"
